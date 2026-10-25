@@ -2,28 +2,31 @@
 
 import { useEffect, useState } from 'react';
 import { RotateCcw } from 'lucide-react';
-import ChunkStrip, { type ChunkCell } from './ChunkStrip';
+import CourtProgress from './CourtProgress';
 import { btnSecondary, btnSmall } from '@/lib/ui';
 
 const TOTAL = 48;
 const PAUSE_AT = 26;
 
-type Phase = 'uploading' | 'paused' | 'done';
+type Phase = 'uploading' | 'paused' | 'finishing' | 'done';
 
 /** A looping demonstration of pause and resume: the one moving part on the landing page. */
 export default function HeroDemo() {
   const [saved, setSaved] = useState(0);
   const [phase, setPhase] = useState<Phase>('uploading');
   const [run, setRun] = useState(0);
-  const [reduced, setReduced] = useState(false);
+  const [reduced, setReduced] = useState(true);
 
   useEffect(() => {
-    const prefersReduced = window.matchMedia(
-      '(prefers-reduced-motion: reduce)',
-    ).matches;
-    setReduced(prefersReduced);
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const change = () => setReduced(media.matches);
+    change();
+    media.addEventListener('change', change);
+    return () => media.removeEventListener('change', change);
+  }, []);
 
-    if (prefersReduced) {
+  useEffect(() => {
+    if (reduced) {
       setSaved(PAUSE_AT);
       setPhase('paused');
       return;
@@ -37,7 +40,11 @@ export default function HeroDemo() {
 
     const step = () => {
       if (n >= TOTAL) {
-        setPhase('done');
+        setPhase('finishing');
+        timer = setTimeout(() => {
+          setPhase('done');
+          timer = setTimeout(() => setRun((r) => r + 1), 4800);
+        }, 1000);
         return;
       }
       if (n === PAUSE_AT && !resumed) {
@@ -56,18 +63,17 @@ export default function HeroDemo() {
     timer = setTimeout(step, 600);
 
     return () => clearTimeout(timer);
-  }, [run]);
+  }, [run, reduced]);
 
-  const cells: ChunkCell[] = Array.from({ length: TOTAL }, (_, i) => ({
-    fill: i < saved ? 1 : 0,
-    active: phase === 'uploading' && i >= saved && i < saved + 3,
-  }));
+  const savedIndices = Array.from({ length: saved }, (_, i) => i);
 
   const message =
     phase === 'paused'
       ? 'Paused. Resume sends only the pieces that are still missing.'
       : phase === 'done'
         ? 'Complete. Every piece is saved.'
+        : phase === 'finishing'
+          ? 'All pieces arrived. Putting the file together on the server…'
         : 'Uploading';
 
   return (
@@ -80,7 +86,10 @@ export default function HeroDemo() {
       </div>
 
       <div className="mt-5">
-        <ChunkStrip cells={cells} tall />
+        <CourtProgress totalPieces={TOTAL} savedIndices={savedIndices}
+          inFlightCount={phase === 'uploading' ? Math.min(3, TOTAL - saved) : 0}
+          phase={phase === 'done' ? 'completed' : phase}
+          label="Demo upload progress" progress={saved / TOTAL * 100} variant="full" />
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">

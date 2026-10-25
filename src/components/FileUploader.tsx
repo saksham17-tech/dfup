@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   createUploader,
   CHUNK_SIZE,
@@ -9,7 +9,7 @@ import {
   type UploadState,
 } from '@/lib/upload';
 import { Pause, Play, X, RotateCcw, Check } from 'lucide-react';
-import ChunkStrip, { buildCells } from './ChunkStrip';
+import CourtProgress from './CourtProgress';
 import {
   btnAccent,
   btnPrimary,
@@ -17,7 +17,6 @@ import {
   formatBytes,
 } from '@/lib/ui';
 
-const EMPTY_CELLS = buildCells(48, []);
 const PIECE_MB = CHUNK_SIZE / (1024 * 1024);
 
 export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) {
@@ -76,15 +75,9 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
   const totalPieces = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
   const savedPieces = uploadedChunks.length;
 
-  const cells = useMemo(
-    () =>
-      buildCells(
-        totalPieces,
-        uploadedChunks,
-        status === 'uploading' ? MAX_CONCURRENT_UPLOADS : 0,
-      ),
-    [totalPieces, uploadedChunks, status],
-  );
+  const finishing = totalBytes > 0 && uploadedBytes >= totalBytes;
+  const courtPhase = status === 'processing' || (status === 'uploading' && finishing)
+    ? 'finishing' : status === 'init' ? 'uploading' : status;
 
   const statusLine: Record<UploadState['status'], string> = {
     idle: '',
@@ -128,7 +121,8 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
             fails, Vault sends only the pieces that are still missing.
           </p>
           <div className="mt-8">
-            <ChunkStrip cells={EMPTY_CELLS} tall />
+            <CourtProgress totalPieces={48} savedIndices={[]} phase="idle"
+              label="Ready to upload" progress={0} variant="compact" />
           </div>
           <div className="mt-8 flex flex-wrap items-center gap-4">
             <button
@@ -156,12 +150,18 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
           </div>
 
           <div className="mt-6">
-            <ChunkStrip
-              cells={cells}
-              tall
+            <CourtProgress
+              totalPieces={totalPieces}
+              savedIndices={uploadedChunks}
+              phase={courtPhase}
+              inFlightCount={status === 'uploading' && !finishing
+                ? Math.min(MAX_CONCURRENT_UPLOADS, totalPieces - savedPieces) : 0}
               label="Upload progress"
-              valueNow={progress}
+              progress={progress}
             />
+            <p className="mt-2 text-xs tabular-nums text-muted">
+              {savedPieces} of {totalPieces} pieces scored
+            </p>
           </div>
 
           <div className="mt-4 flex flex-col justify-between gap-1 sm:flex-row sm:gap-6">

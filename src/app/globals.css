@@ -11,6 +11,9 @@
   --color-cobalt-soft: #dde1fb;
   --color-alert: #b8321f;
   --color-alert-soft: #f6ddd8;
+  --color-ball: #e8651a;
+  --color-ball-dark: #b84a0f;
+  --color-rim: #d8381f;
 }
 
 @theme inline {
@@ -53,7 +56,21 @@ body {
   }
 }
 
-/* Chunk strip: the signature element --------------------------------- */
+/* Court geometry is reserved for both canvas and static fallback. */
+.court-frame {
+  height: 220px;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  background: var(--color-paper);
+}
+.court-compact { height: 190px; }
+@media (min-width: 640px) {
+  .court-frame { height: 300px; }
+  .court-compact { height: 240px; }
+}
+
+/* Chunk strip: reduced-motion and canvas fallback -------------------- */
 .chunk-cell {
   position: relative;
   display: block;
