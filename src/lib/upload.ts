@@ -57,7 +57,7 @@ export async function sha256(data: ArrayBuffer | Blob): Promise<string> {
     .join('');
 }
 
-/** Split a File into 5 MB Blob slices with metadata */
+/** Split a File into 4 MB Blob slices with metadata */
 export function sliceFile(file: File) {
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
   const chunks: ChunkMeta[] = [];
@@ -104,6 +104,21 @@ async function apiStatus(fileId: string) {
     totalChunks: number;
     uploadedChunks: number[];
   }>;
+}
+
+async function apiComplete(fileId: string, signal: AbortSignal) {
+  try {
+    const { data } = await axios.post<{ completed?: boolean }>(`${API}/${fileId}/complete`, null, {
+      signal, timeout: CHUNK_TIMEOUT_MS,
+    });
+    if (data.completed !== true) throw new Error('The server did not confirm the upload. Retry to finish it.');
+  } catch (error: unknown) {
+    if (axios.isCancel(error)) throw new DOMException('Upload cancelled', 'AbortError');
+    if (axios.isAxiosError<{ error?: string }>(error)) {
+      throw new Error(error.response?.data?.error || error.message || 'Could not confirm the upload. Retry to finish it.');
+    }
+    throw error;
+  }
 }
 
 /**
@@ -273,7 +288,7 @@ async function runPool<T>(
 /**
  * High-level uploader with concurrent pool + smooth byte-level progress.
  *
- * Progress model (avoids 5 MB stair-steps):
+ * Progress model (avoids 4 MB stair-steps):
  *   loadedBytes =
  *     sum(size of completed chunks) +
  *     sum(activeChunkBytes values for in-flight chunks)
@@ -287,13 +302,17 @@ export function createUploader(
   let currentFile: File | null = null;
   let fileId: string | null = null;
   let poolController: AbortController | null = null;
+  let generation = 0;
 
   const set = (partial: Partial<UploadState>) => onUpdate(partial);
   const isUserAbort = () => aborted || paused;
 
-  async function uploadMissing(file: File, id: string) {
+  async function uploadMissing(file: File, id: string, run: number) {
+    const shouldStop = () => isUserAbort() || run !== generation;
     const { chunks } = sliceFile(file);
     const status = await apiStatus(id);
+    if (shouldStop()) return;
+    if (status.totalChunks !== chunks.length) throw new Error('The stored upload does not match this file. Upload the file again.');
     const completed = new Set<number>(status.uploadedChunks);
 
     // Bytes already fully accepted by the server (by chunk index)
@@ -319,6 +338,7 @@ export function createUploader(
     };
 
     const reportProgress = () => {
+      if (shouldStop()) return;
       const loadedBytes = computeLoaded();
       set({
         uploadedBytes: loadedBytes,
@@ -328,7 +348,7 @@ export function createUploader(
     };
 
     const scheduleProgress = () => {
-      if (pendingEmit) return;
+      if (pendingEmit || shouldStop()) return;
       pendingEmit = true;
       rafId = requestAnimationFrame(() => {
         pendingEmit = false;
@@ -343,25 +363,21 @@ export function createUploader(
     });
     reportProgress();
 
-    if (status.status === 'COMPLETED' || completed.size >= status.totalChunks) {
-      if (rafId) cancelAnimationFrame(rafId);
-      set({ status: 'completed', progress: 100, uploadedBytes: file.size });
-      return;
-    }
-
-    const pending = chunks.filter((c) => !completed.has(c.index));
-    poolController = new AbortController();
+    const pending = status.status === 'COMPLETED' ? [] : chunks.filter((c) => !completed.has(c.index));
+    const controller = new AbortController();
+    poolController = controller;
 
     try {
       await runPool(
         pending,
         MAX_CONCURRENT_UPLOADS,
         async (item) => {
-          if (isUserAbort()) {
+          if (shouldStop()) {
             throw new DOMException('Upload paused or cancelled', 'AbortError');
           }
 
           const checksum = await sha256(item.blob);
+          if (shouldStop()) throw new DOMException('Upload paused or cancelled', 'AbortError');
 
           // Mark chunk as active at 0 before the request starts
           activeChunkBytes.set(item.index, 0);
@@ -373,8 +389,8 @@ export function createUploader(
               item.index,
               checksum,
               item.blob,
-              poolController!.signal,
-              isUserAbort,
+              controller.signal,
+              shouldStop,
               (loaded) => {
                 // Cap at pure chunk size (FormData overhead already scaled in apiChunkOnce)
                 activeChunkBytes.set(
@@ -394,50 +410,33 @@ export function createUploader(
           completedBytesByIndex.set(item.index, item.size);
           scheduleProgress();
         },
-        isUserAbort,
+        shouldStop,
       );
     } finally {
       if (rafId) cancelAnimationFrame(rafId);
       activeChunkBytes.clear();
     }
 
-    if (paused || aborted) return;
+    if (shouldStop()) return;
 
-    // All bytes are on the server — show processing while merge runs
+    // Completion is an explicit acknowledgement, not an assumption based on byte progress.
     set({
       status: 'processing',
       progress: 100,
       uploadedBytes: file.size,
+      uploadedChunks: [...completed],
     });
 
-    // Wait for server-side merge before declaring success
-    // (the last chunk response already awaited mergeChunks on the server;
-    //  we still poll in case concurrent last chunks raced)
-    const final = await apiStatus(id);
-    if (
-      final.status === 'COMPLETED' ||
-      final.uploadedChunks.length >= final.totalChunks
-    ) {
-      if (final.status !== 'COMPLETED') {
-        for (let i = 0; i < 30; i++) {
-          await new Promise((r) => setTimeout(r, 500));
-          const s = await apiStatus(id);
-          if (s.status === 'COMPLETED') break;
-          if (s.status === 'FAILED') {
-            throw new Error('Server failed to assemble the file');
-          }
-        }
-      }
-      set({
-        status: 'completed',
-        progress: 100,
-        uploadedBytes: file.size,
-      });
-    }
+    await apiComplete(id, controller.signal);
+    if (shouldStop()) return;
+    set({ status: 'completed', progress: 100, uploadedBytes: file.size,
+      uploadedChunks: chunks.map((chunk) => chunk.index) });
   }
 
   return {
     async start(file: File) {
+      const run = ++generation;
+      poolController?.abort();
       aborted = false;
       paused = false;
       currentFile = file;
@@ -456,11 +455,12 @@ export function createUploader(
       try {
         const { totalChunks } = sliceFile(file);
         const { fileId: id } = await apiInit(file, totalChunks);
+        if (run !== generation || isUserAbort()) return;
         fileId = id;
         set({ fileId: id, status: 'uploading' });
-        await uploadMissing(file, id);
+        await uploadMissing(file, id, run);
       } catch (err: unknown) {
-        if (aborted || paused) return;
+        if (aborted || paused || run !== generation) return;
         const message = err instanceof Error ? err.message : String(err);
         set({ status: 'error', error: message });
       }
@@ -474,19 +474,22 @@ export function createUploader(
 
     async resume() {
       if (!currentFile || !fileId) return;
+      const run = ++generation;
+      poolController?.abort();
       paused = false;
       aborted = false;
       set({ status: 'uploading', error: null });
       try {
-        await uploadMissing(currentFile, fileId);
+        await uploadMissing(currentFile, fileId, run);
       } catch (err: unknown) {
-        if (aborted || paused) return;
+        if (aborted || paused || run !== generation) return;
         const message = err instanceof Error ? err.message : String(err);
         set({ status: 'error', error: message });
       }
     },
 
     abort() {
+      generation++;
       aborted = true;
       paused = false;
       poolController?.abort();

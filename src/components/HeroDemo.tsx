@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { RotateCcw } from 'lucide-react';
 import CourtProgress from './CourtProgress';
+import CourtEnvironment, { useReducedCourtMotion } from './CourtEnvironment';
+import { createUploadBridge } from '@/lib/court/uploadBridge';
 import { btnSecondary, btnSmall } from '@/lib/ui';
 
 const TOTAL = 48;
@@ -15,15 +17,9 @@ export default function HeroDemo() {
   const [saved, setSaved] = useState(0);
   const [phase, setPhase] = useState<Phase>('uploading');
   const [run, setRun] = useState(0);
-  const [reduced, setReduced] = useState(true);
-
-  useEffect(() => {
-    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const change = () => setReduced(media.matches);
-    change();
-    media.addEventListener('change', change);
-    return () => media.removeEventListener('change', change);
-  }, []);
+  const reduced = useReducedCourtMotion();
+  // ── Demo only: this emitter is never shared with real uploads ──
+  const [demoBridge] = useState(() => createUploadBridge(true));
 
   useEffect(() => {
     if (reduced) {
@@ -37,6 +33,7 @@ export default function HeroDemo() {
     let timer: ReturnType<typeof setTimeout>;
     setSaved(0);
     setPhase('uploading');
+    demoBridge.reset();
 
     const step = () => {
       if (n >= TOTAL) {
@@ -63,9 +60,17 @@ export default function HeroDemo() {
     timer = setTimeout(step, 600);
 
     return () => clearTimeout(timer);
-  }, [run, reduced]);
+  }, [run, reduced, demoBridge]);
 
   const savedIndices = Array.from({ length: saved }, (_, i) => i);
+  useEffect(() => {
+    demoBridge.reconcile(
+      Array.from({ length: saved }, (_, i) => i),
+      phase === 'done' ? 'completed' : phase,
+      TOTAL,
+      'demo',
+    );
+  }, [saved, phase, demoBridge]);
 
   const message =
     phase === 'paused'
@@ -73,43 +78,55 @@ export default function HeroDemo() {
       : phase === 'done'
         ? 'Complete. Every piece is saved.'
         : phase === 'finishing'
-          ? 'All pieces arrived. Putting the file together on the server…'
-        : 'Uploading';
+          ? 'All pieces arrived. Confirming your upload…'
+          : 'Uploading';
 
   return (
-    <div className="rounded-lg border border-line bg-surface p-5 sm:p-8">
-      <div className="flex items-baseline justify-between gap-4">
-        <p className="truncate font-display text-lg font-semibold">
-          site-footage-final.mov
-        </p>
-        <p className="shrink-0 text-sm tabular-nums text-muted">192 MB</p>
-      </div>
+    <CourtEnvironment bridge={demoBridge}>
+      <div className="court-glass rounded-lg border border-line bg-surface/80 p-5 sm:p-8">
+        <div className="flex items-baseline justify-between gap-4">
+          <p className="truncate font-display text-lg font-semibold">
+            site-footage-final.mov
+          </p>
+          <p className="shrink-0 text-sm tabular-nums text-muted">192 MB</p>
+        </div>
 
-      <div className="mt-5">
-        <CourtProgress totalPieces={TOTAL} savedIndices={savedIndices}
-          inFlightCount={phase === 'uploading' ? Math.min(3, TOTAL - saved) : 0}
-          phase={phase === 'done' ? 'completed' : phase}
-          label="Demo upload progress" progress={saved / TOTAL * 100} variant="full" />
-      </div>
+        <div className="mb-5 mt-2 text-xs font-medium uppercase tracking-widest text-muted">
+          Demo · 4 MB per piece
+        </div>
+        <div className="mt-5">
+          <CourtProgress
+            totalPieces={TOTAL}
+            savedIndices={savedIndices}
+            inFlightCount={
+              phase === 'uploading' ? Math.min(3, TOTAL - saved) : 0
+            }
+            phase={phase === 'done' ? 'completed' : phase}
+            label="Demo upload progress"
+            progress={(saved / TOTAL) * 100}
+            variant="full"
+          />
+        </div>
 
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted">
-          <span aria-live="polite">{message}</span>{' '}
-          <span className="tabular-nums">
-            {saved} of {TOTAL} pieces saved.
-          </span>
-        </p>
-        {!reduced && phase === 'done' && (
-          <button
-            type="button"
-            onClick={() => setRun((r) => r + 1)}
-            className={`${btnSecondary} ${btnSmall}`}
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Replay
-          </button>
-        )}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-muted">
+            <span aria-live="polite">{message}</span>{' '}
+            <span className="tabular-nums">
+              {saved} of {TOTAL} pieces saved.
+            </span>
+          </p>
+          {!reduced && phase === 'done' && (
+            <button
+              type="button"
+              onClick={() => setRun((r) => r + 1)}
+              className={`${btnSecondary} ${btnSmall}`}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Replay
+            </button>
+          )}
+        </div>
       </div>
-    </div>
+    </CourtEnvironment>
   );
 }

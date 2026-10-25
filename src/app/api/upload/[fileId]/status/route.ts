@@ -24,21 +24,21 @@ export async function GET(
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
     }
 
-    const { data: rows, error } = await supabase
-      .from('file_chunks')
-      .select('chunk_index')
-      .eq('file_id', fileId)
-      .order('chunk_index', { ascending: true });
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    const uploadedChunks = new Set<number>();
+    for (let offset = 0; ; offset += 1000) {
+      const { data: rows, error } = await supabase
+        .from('file_chunks').select('chunk_index').eq('file_id', fileId)
+        .order('chunk_index', { ascending: true }).range(offset, offset + 999);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      for (const row of rows ?? []) uploadedChunks.add(Number(row.chunk_index));
+      if (!rows || rows.length < 1000) break;
     }
 
     return NextResponse.json(
       {
         status: file.status,
         totalChunks: file.total_chunks,
-        uploadedChunks: (rows ?? []).map((r) => r.chunk_index as number),
+        uploadedChunks: [...uploadedChunks],
       },
       { headers: { 'Cache-Control': 'no-store' } },
     );

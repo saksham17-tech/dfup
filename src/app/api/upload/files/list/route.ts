@@ -3,6 +3,7 @@ import {
   getSupabaseServer,
   STORAGE_BUCKET,
 } from '@/lib/supabaseServer';
+import { chunkPrefix } from '@/lib/chunkStorage';
 
 /**
  * GET /api/upload/files/list
@@ -42,7 +43,9 @@ export async function GET(req: NextRequest) {
       (files ?? []).map(async (file) => {
         let downloadUrl: string | null = null;
 
-        if (file.storage_path && !bin) {
+        if (file.storage_path === chunkPrefix(file.id) && !bin) {
+          downloadUrl = `/api/upload/files/${file.id}/download`;
+        } else if (file.storage_path && !bin) {
           const { data: signed, error: signErr } = await supabase.storage
             .from(STORAGE_BUCKET)
             .createSignedUrl(file.storage_path, 3600);

@@ -31,7 +31,9 @@ type Pending = { file: FileRow; permanentOnly: boolean };
 
 function extension(name: string) {
   const i = name.lastIndexOf('.');
-  return i > 0 && i < name.length - 1 ? name.slice(i + 1, i + 5).toLowerCase() : 'file';
+  return i > 0 && i < name.length - 1
+    ? name.slice(i + 1, i + 5).toLowerCase()
+    : 'file';
 }
 
 type Props = {
@@ -72,12 +74,18 @@ export default function FileDashboard({
         : '/api/upload/files/list';
       const [qRes, fRes] = await Promise.all([
         isBin
-          ? Promise.resolve(new Response(JSON.stringify({ usedBytes: 0, fileCount: 0 }), { status: 200 }))
+          ? Promise.resolve(
+              new Response(JSON.stringify({ usedBytes: 0, fileCount: 0 }), {
+                status: 200,
+              }),
+            )
           : fetch('/api/upload/usage/quota'),
         fetch(listUrl),
       ]);
-      if (!qRes.ok) throw new Error((await qRes.text()) || `Quota ${qRes.status}`);
-      if (!fRes.ok) throw new Error((await fRes.text()) || `List ${fRes.status}`);
+      if (!qRes.ok)
+        throw new Error((await qRes.text()) || `Quota ${qRes.status}`);
+      if (!fRes.ok)
+        throw new Error((await fRes.text()) || `List ${fRes.status}`);
       setQuota((await qRes.json()) as Quota);
       const f = (await fRes.json()) as FileRow[];
       setFiles(Array.isArray(f) ? f : []);
@@ -172,7 +180,9 @@ export default function FileDashboard({
             disabled={loading}
             className={`${btnSecondary} ${btnSmall}`}
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin motion-reduce:animate-none' : ''}`} />
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${loading ? 'animate-spin motion-reduce:animate-none' : ''}`}
+            />
             Refresh
           </button>
         </div>
@@ -206,7 +216,7 @@ export default function FileDashboard({
         )}
 
         {visible.length > 0 && (
-          <div className="overflow-hidden rounded-lg border border-line bg-surface">
+          <div className="court-glass overflow-hidden rounded-lg border border-line bg-surface/80">
             <div
               className={`${ROW_GRID} hidden border-b border-line px-4 py-2 text-sm text-muted sm:grid`}
             >
@@ -325,9 +335,14 @@ export default function FileDashboard({
               id="delete-title"
               className="font-display text-xl font-semibold tracking-tight"
             >
-              {pending.permanentOnly ? 'Delete permanently?' : 'Delete this file?'}
+              {pending.permanentOnly
+                ? 'Delete permanently?'
+                : 'Delete this file?'}
             </h3>
-            <p className="mt-1 truncate text-sm font-medium" title={pending.file.filename}>
+            <p
+              className="mt-1 truncate text-sm font-medium"
+              title={pending.file.filename}
+            >
               {pending.file.filename}
             </p>
             <p className="mt-3 text-sm leading-relaxed text-muted">

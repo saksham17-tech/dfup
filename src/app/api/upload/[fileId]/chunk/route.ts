@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createHash } from 'crypto';
+import { completeChunkUpload, UploadCompletionError } from '@/lib/chunkStorage';
 import {
   getSupabaseServer,
   STORAGE_BUCKET,
@@ -13,14 +14,8 @@ import {
  *  1. Verify SHA-256
  *  2. Store chunk at  dfup/chunks/{fileId}/{chunkIndex}
  *  3. Upsert file_chunks row
- *  4. When all chunks are present → merge into one object, mark COMPLETED
- *
- * Merge note (serverless):
- *  Supabase Storage has no server-side concat API. We download each chunk
- *  into this Route Handler, Buffer.concat, then re-upload. That means peak
- *  memory ≈ file size. Fine for free-tier ≤ 1 GB on a roomy Node process;
- *  on strict serverless (e.g. Vercel 1024–3008 MB limits) prefer smaller
- *  files or a TUS/direct-to-storage path for very large uploads.
+ *  4. When all chunks are present → mark COMPLETED, keeping the stored pieces.
+ *     Downloads stream these objects; no whole-file merge or re-upload occurs.
  */
 export async function POST(
   req: NextRequest,
@@ -28,7 +23,8 @@ export async function POST(
 ) {
   try {
     const { fileId } = await context.params;
-    const chunkIndex = Number(req.nextUrl.searchParams.get('chunkIndex'));
+    const rawIndex = req.nextUrl.searchParams.get('chunkIndex');
+    const chunkIndex = rawIndex === null ? NaN : Number(rawIndex);
     const checksum = (req.nextUrl.searchParams.get('checksum') || '')
       .trim()
       .toLowerCase();
@@ -71,24 +67,12 @@ export async function POST(
 
     const { data: file, error: fileErr } = await supabase
       .from('files')
-      .select('id, total_chunks, status, filename, mime_type')
+      .select('id, total_chunks, status, storage_path, deleted_at')
       .eq('id', fileId)
       .single();
 
     if (fileErr || !file) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
-    }
-    if (file.status === 'COMPLETED') {
-      return NextResponse.json(
-        { error: 'File already completed' },
-        { status: 400 },
-      );
-    }
-    if (file.status === 'FAILED') {
-      return NextResponse.json(
-        { error: 'File is in FAILED state' },
-        { status: 400 },
-      );
     }
     if (chunkIndex >= file.total_chunks) {
       return NextResponse.json(
@@ -97,6 +81,14 @@ export async function POST(
         },
         { status: 400 },
       );
+    }
+    if (file.deleted_at) {
+      return NextResponse.json({ error: 'File is in the bin' }, { status: 409 });
+    }
+    // A parallel request or lost response may arrive after completion. Never rewrite saved data.
+    if (file.status === 'COMPLETED') {
+      return NextResponse.json({ ok: true, chunkIndex, uploadedChunks: file.total_chunks,
+        totalChunks: file.total_chunks, completed: true, storagePath: file.storage_path });
     }
 
     // ── 1. Persist chunk object ──────────────────────────────────────────
@@ -163,8 +155,15 @@ export async function POST(
     let storagePath: string | null = null;
 
     if (uploadedCount >= file.total_chunks) {
-      storagePath = await mergeChunks(supabase, fileId, file);
-      completed = true;
+      try {
+        const result = await completeChunkUpload(supabase, fileId);
+        storagePath = result.storagePath;
+        completed = true;
+      } catch (error) {
+        // The chunk is durable even if another parallel request has not finished yet.
+        // The explicit completion call reports missing pieces to the client.
+        if (!(error instanceof UploadCompletionError) || error.status !== 409) throw error;
+      }
     }
 
     return NextResponse.json(
@@ -184,103 +183,5 @@ export async function POST(
       { error: err instanceof Error ? err.message : 'Internal error' },
       { status: 500 },
     );
-  }
-}
-
-/**
- * Download every chunk in index order, Buffer.concat, upload merged object,
- * delete intermediate chunks, mark file COMPLETED.
- *
- * Final object path:  merged/{fileId}/{filename}
- * (fileId prefix avoids collisions when two users upload the same name)
- */
-async function mergeChunks(
-  supabase: ReturnType<typeof getSupabaseServer>,
-  fileId: string,
-  file: {
-    total_chunks: number;
-    filename: string;
-    mime_type: string;
-  },
-): Promise<string> {
-  try {
-    // Prefer listing Storage so we only merge objects that actually exist,
-    // then sort numerically (string sort would put "10" before "2").
-    const { data: listed, error: listErr } = await supabase.storage
-      .from(STORAGE_BUCKET)
-      .list(`chunks/${fileId}`, { limit: 10_000 });
-
-    let orderedPaths: string[];
-
-    if (!listErr && listed && listed.length > 0) {
-      orderedPaths = listed
-        .filter((o) => o.name && /^\d+$/.test(o.name))
-        .sort((a, b) => Number(a.name) - Number(b.name))
-        .map((o) => `chunks/${fileId}/${o.name}`);
-
-      if (orderedPaths.length < file.total_chunks) {
-        throw new Error(
-          `Expected ${file.total_chunks} chunks in storage, found ${orderedPaths.length}`,
-        );
-      }
-    } else {
-      // Fallback: sequential indices 0..total_chunks-1
-      orderedPaths = Array.from(
-        { length: file.total_chunks },
-        (_, i) => `chunks/${fileId}/${i}`,
-      );
-    }
-
-    // Sequential download → append into one Buffer
-    const parts: Buffer[] = [];
-    for (const path of orderedPaths) {
-      const { data, error } = await supabase.storage
-        .from(STORAGE_BUCKET)
-        .download(path);
-
-      if (error || !data) {
-        throw new Error(`Missing chunk object ${path}: ${error?.message}`);
-      }
-      parts.push(Buffer.from(await data.arrayBuffer()));
-    }
-
-    const assembled = Buffer.concat(parts);
-    const finalPath = `merged/${fileId}/${file.filename}`;
-
-    const { error: upErr } = await supabase.storage
-      .from(STORAGE_BUCKET)
-      .upload(finalPath, assembled, {
-        contentType: file.mime_type || 'application/octet-stream',
-        upsert: true,
-      });
-
-    if (upErr) {
-      throw new Error(`Final upload failed: ${upErr.message}`);
-    }
-
-    // Best-effort cleanup of intermediate chunk objects
-    await supabase.storage.from(STORAGE_BUCKET).remove(orderedPaths);
-
-    const { error: dbErr } = await supabase
-      .from('files')
-      .update({ status: 'COMPLETED', storage_path: finalPath })
-      .eq('id', fileId);
-
-    if (dbErr) {
-      throw new Error(`DB update failed after merge: ${dbErr.message}`);
-    }
-
-    console.log(
-      `Merged ${orderedPaths.length} chunks → ${STORAGE_BUCKET}/${finalPath} (${assembled.length} bytes)`,
-    );
-
-    return finalPath;
-  } catch (err) {
-    console.error(`merge failed for ${fileId}`, err);
-    await supabase
-      .from('files')
-      .update({ status: 'FAILED' })
-      .eq('id', fileId);
-    throw err;
   }
 }

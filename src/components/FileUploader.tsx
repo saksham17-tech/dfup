@@ -10,16 +10,16 @@ import {
 } from '@/lib/upload';
 import { Pause, Play, X, RotateCcw, Check } from 'lucide-react';
 import CourtProgress from './CourtProgress';
-import {
-  btnAccent,
-  btnPrimary,
-  btnSecondary,
-  formatBytes,
-} from '@/lib/ui';
+import { uploadBridge } from '@/lib/court/uploadBridge';
+import { btnAccent, btnPrimary, btnSecondary, formatBytes } from '@/lib/ui';
 
 const PIECE_MB = CHUNK_SIZE / (1024 * 1024);
 
-export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) {
+export default function FileUploader({
+  onSuccess,
+}: {
+  onSuccess?: () => void;
+}) {
   const [uploadState, setUploadState] = useState<UploadState>({
     fileId: null,
     status: 'idle',
@@ -76,14 +76,31 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
   const savedPieces = uploadedChunks.length;
 
   const finishing = totalBytes > 0 && uploadedBytes >= totalBytes;
-  const courtPhase = status === 'processing' || (status === 'uploading' && finishing)
-    ? 'finishing' : status === 'init' ? 'uploading' : status;
+  const courtPhase =
+    status === 'processing' || (status === 'uploading' && finishing)
+      ? 'finishing'
+      : status === 'init'
+        ? 'uploading'
+        : status;
+
+  // ── Upload events: only indices acknowledged by the server can create a shot ──
+  useEffect(() => {
+    uploadBridge.reconcile(
+      uploadedChunks,
+      courtPhase,
+      totalPieces,
+      uploadState.fileId,
+    );
+  }, [uploadedChunks, courtPhase, totalPieces, uploadState.fileId]);
+  useEffect(() => () => uploadBridge.reset(), []);
 
   const statusLine: Record<UploadState['status'], string> = {
     idle: '',
     init: 'Preparing your upload…',
-    uploading: `${savedPieces} of ${totalPieces} pieces saved`,
-    processing: 'All pieces arrived. Putting the file together on the server…',
+    uploading: finishing
+      ? 'Last piece sent. Confirming with the server…'
+      : `${savedPieces} of ${totalPieces} pieces saved`,
+    processing: 'Last piece sent. Confirming with the server…',
     paused: `Paused. ${savedPieces} of ${totalPieces} pieces are saved, and Resume sends only the rest.`,
     completed: 'Done. Your file is in My files.',
     error: error ?? 'The upload stopped.',
@@ -109,8 +126,10 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
           }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
-          className={`rounded-lg border border-dashed p-6 transition-colors motion-reduce:transition-none sm:p-10 ${
-            dragging ? 'border-cobalt bg-cobalt-soft' : 'border-line bg-surface'
+          className={`court-glass rounded-lg border border-dashed p-6 transition-colors motion-reduce:transition-none sm:p-10 ${
+            dragging
+              ? 'border-cobalt bg-cobalt-soft'
+              : 'border-line bg-surface/80'
           }`}
         >
           <h2 className="font-display text-3xl font-semibold tracking-tight sm:text-4xl">
@@ -120,10 +139,6 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
             Files go up in {PIECE_MB} MB pieces. If you pause or a request
             fails, Vault sends only the pieces that are still missing.
           </p>
-          <div className="mt-8">
-            <CourtProgress totalPieces={48} savedIndices={[]} phase="idle"
-              label="Ready to upload" progress={0} variant="compact" />
-          </div>
           <div className="mt-8 flex flex-wrap items-center gap-4">
             <button
               type="button"
@@ -132,11 +147,13 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
             >
               Choose file
             </button>
-            <span className="text-sm text-muted">or drag it onto this panel</span>
+            <span className="text-sm text-muted">
+              or drag it onto this panel
+            </span>
           </div>
         </div>
       ) : (
-        <div className="rounded-lg border border-line bg-surface p-5 sm:p-8">
+        <div className="court-glass rounded-lg border border-line bg-surface/80 p-5 sm:p-8">
           <div className="flex items-start justify-between gap-4">
             <h2
               className="min-w-0 truncate font-display text-xl font-semibold sm:text-2xl"
@@ -154,13 +171,16 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
               totalPieces={totalPieces}
               savedIndices={uploadedChunks}
               phase={courtPhase}
-              inFlightCount={status === 'uploading' && !finishing
-                ? Math.min(MAX_CONCURRENT_UPLOADS, totalPieces - savedPieces) : 0}
+              inFlightCount={
+                status === 'uploading' && !finishing
+                  ? Math.min(MAX_CONCURRENT_UPLOADS, totalPieces - savedPieces)
+                  : 0
+              }
               label="Upload progress"
               progress={progress}
             />
             <p className="mt-2 text-xs tabular-nums text-muted">
-              {savedPieces} of {totalPieces} pieces scored
+              {savedPieces} of {totalPieces} pieces saved
             </p>
           </div>
 
