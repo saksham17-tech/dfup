@@ -97,7 +97,7 @@ async function apiInit(file: File, totalChunks: number) {
 }
 
 async function apiStatus(fileId: string) {
-  const res = await fetch(`${API}/${fileId}/status`);
+  const res = await fetch(`${API}/${fileId}/status`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Status failed (${res.status})`);
   return res.json() as Promise<{
     status: string;

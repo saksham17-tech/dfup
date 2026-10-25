@@ -18,17 +18,21 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
   const controlsRef = useRef<UploadControls | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Keep latest onSuccess without recreating the uploader (which would drop fileId/paused state)
+  const onSuccessRef = useRef(onSuccess);
+  useEffect(() => {
+    onSuccessRef.current = onSuccess;
+  }, [onSuccess]);
+
   useEffect(() => {
     controlsRef.current = createUploader((newState) => {
-      setUploadState((prev) => {
-        const updated = { ...prev, ...newState };
-        if (updated.status === 'completed') {
-          onSuccess?.();
-        }
-        return updated;
-      });
+      setUploadState((prev) => ({ ...prev, ...newState }));
+      if (newState.status === 'completed') {
+        onSuccessRef.current?.();
+      }
     });
-  }, [onSuccess]);
+    return () => controlsRef.current?.abort();
+  }, []);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
