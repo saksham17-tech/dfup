@@ -1,8 +1,24 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
-import { createUploader, UploadControls, UploadState } from '@/lib/upload';
-import { Play, Pause, X, CheckCircle, AlertCircle, UploadCloud } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createUploader,
+  CHUNK_SIZE,
+  MAX_CONCURRENT_UPLOADS,
+  type UploadControls,
+  type UploadState,
+} from '@/lib/upload';
+import { Pause, Play, X, RotateCcw, Check } from 'lucide-react';
+import ChunkStrip, { buildCells } from './ChunkStrip';
+import {
+  btnAccent,
+  btnPrimary,
+  btnSecondary,
+  formatBytes,
+} from '@/lib/ui';
+
+const EMPTY_CELLS = buildCells(48, []);
+const PIECE_MB = CHUNK_SIZE / (1024 * 1024);
 
 export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) {
   const [uploadState, setUploadState] = useState<UploadState>({
@@ -14,6 +30,8 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
     error: null,
     uploadedChunks: [],
   });
+  const [fileName, setFileName] = useState('');
+  const [dragging, setDragging] = useState(false);
 
   const controlsRef = useRef<UploadControls | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -34,107 +52,195 @@ export default function FileUploader({ onSuccess }: { onSuccess?: () => void }) 
     return () => controlsRef.current?.abort();
   }, []);
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !controlsRef.current) return;
+  const startFile = async (file: File) => {
+    if (!controlsRef.current) return;
+    setFileName(file.name);
     await controlsRef.current.start(file);
   };
 
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow picking the same file again later
+    if (file) await startFile(file);
   };
 
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) await startFile(file);
+  };
+
+  const { status, totalBytes, uploadedBytes, progress, uploadedChunks, error } =
+    uploadState;
+  const totalPieces = Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE));
+  const savedPieces = uploadedChunks.length;
+
+  const cells = useMemo(
+    () =>
+      buildCells(
+        totalPieces,
+        uploadedChunks,
+        status === 'uploading' ? MAX_CONCURRENT_UPLOADS : 0,
+      ),
+    [totalPieces, uploadedChunks, status],
+  );
+
+  const statusLine: Record<UploadState['status'], string> = {
+    idle: '',
+    init: 'Preparing your upload…',
+    uploading: `${savedPieces} of ${totalPieces} pieces saved`,
+    processing: 'All pieces arrived. Putting the file together on the server…',
+    paused: `Paused. ${savedPieces} of ${totalPieces} pieces are saved, and Resume sends only the rest.`,
+    completed: 'Done. Your file is in My files.',
+    error: error ?? 'The upload stopped.',
+  };
+
+  const canRetry = status === 'error' && Boolean(uploadState.fileId);
+
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 backdrop-blur-md">
-      {uploadState.status === 'idle' ? (
-        <div 
-          onClick={() => fileInputRef.current?.click()}
-          className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-zinc-700 p-8 transition-colors hover:border-blue-500 cursor-pointer"
+    <section aria-label="Upload a file">
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        onChange={handleFileChange}
+        tabIndex={-1}
+      />
+
+      {status === 'idle' ? (
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={handleDrop}
+          className={`rounded-lg border border-dashed p-6 transition-colors motion-reduce:transition-none sm:p-10 ${
+            dragging ? 'border-cobalt bg-cobalt-soft' : 'border-line bg-surface'
+          }`}
         >
-          <UploadCloud className="mb-3 h-10 w-10 text-zinc-400" />
-          <p className="text-sm font-medium text-zinc-200">Click to upload or drag and drop</p>
-          <p className="mt-1 text-xs text-zinc-500">Supports chunked resumable uploads (4MB chunks)</p>
-          <input 
-            ref={fileInputRef}
-            type="file" 
-            className="hidden" 
-            onChange={handleFileChange}
-          />
+          <h2 className="font-display text-3xl font-semibold tracking-tight sm:text-4xl">
+            Drop a file here
+          </h2>
+          <p className="mt-3 max-w-prose text-muted">
+            Files go up in {PIECE_MB} MB pieces. If you pause or a request
+            fails, Vault sends only the pieces that are still missing.
+          </p>
+          <div className="mt-8">
+            <ChunkStrip cells={EMPTY_CELLS} tall />
+          </div>
+          <div className="mt-8 flex flex-wrap items-center gap-4">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className={btnPrimary}
+            >
+              Choose file
+            </button>
+            <span className="text-sm text-muted">or drag it onto this panel</span>
+          </div>
         </div>
       ) : (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-zinc-200 capitalize">
-              Status: <strong className="text-blue-400">{uploadState.status}</strong>
-            </span>
-            <span className="text-xs text-zinc-400">
-              {formatBytes(uploadState.uploadedBytes)} / {formatBytes(uploadState.totalBytes)} ({Math.round(uploadState.progress)}%)
-            </span>
+        <div className="rounded-lg border border-line bg-surface p-5 sm:p-8">
+          <div className="flex items-start justify-between gap-4">
+            <h2
+              className="min-w-0 truncate font-display text-xl font-semibold sm:text-2xl"
+              title={fileName}
+            >
+              {fileName || 'Your file'}
+            </h2>
+            <p className="shrink-0 font-display text-3xl font-semibold tabular-nums sm:text-4xl">
+              {Math.round(progress)}%
+            </p>
           </div>
 
-          {/* Progress Bar */}
-          <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-800">
-            <div 
-              className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-150"
-              style={{ width: `${uploadState.progress}%` }}
+          <div className="mt-6">
+            <ChunkStrip
+              cells={cells}
+              tall
+              label="Upload progress"
+              valueNow={progress}
             />
           </div>
 
-          {uploadState.error && (
-            <p className="text-xs text-red-400 flex items-center gap-1">
-              <AlertCircle className="h-3.5 w-3.5" /> {uploadState.error}
+          <div className="mt-4 flex flex-col justify-between gap-1 sm:flex-row sm:gap-6">
+            <p
+              aria-live="polite"
+              className={`max-w-prose text-sm ${status === 'error' ? 'text-alert' : 'text-muted'}`}
+            >
+              {statusLine[status]}
             </p>
-          )}
+            <p className="shrink-0 text-sm tabular-nums text-muted">
+              {formatBytes(uploadedBytes)} of {formatBytes(totalBytes)}
+            </p>
+          </div>
 
-          {/* Controls */}
-          <div className="flex items-center gap-3 pt-2">
-            {uploadState.status === 'uploading' && (
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            {status === 'uploading' && (
               <button
+                type="button"
                 onClick={() => controlsRef.current?.pause()}
-                className="flex items-center gap-1.5 rounded-lg bg-amber-600/20 border border-amber-500/30 px-4 py-2 text-xs font-medium text-amber-300 hover:bg-amber-600/30 transition-colors"
+                className={btnSecondary}
               >
-                <Pause className="h-3.5 w-3.5" /> Pause
+                <Pause className="h-4 w-4" />
+                Pause
               </button>
             )}
 
-            {uploadState.status === 'paused' && (
+            {status === 'paused' && (
               <button
+                type="button"
                 onClick={() => controlsRef.current?.resume()}
-                className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-medium text-white hover:bg-blue-500 transition-colors shadow-[0_0_15px_rgba(37,99,235,0.4)]"
+                className={btnAccent}
               >
-                <Play className="h-3.5 w-3.5" /> Resume
+                <Play className="h-4 w-4" />
+                Resume
               </button>
             )}
 
-            {(uploadState.status === 'uploading' || uploadState.status === 'paused' || uploadState.status === 'error') && (
+            {canRetry && (
               <button
-                onClick={() => controlsRef.current?.abort()}
-                className="flex items-center gap-1.5 rounded-lg bg-zinc-800 px-4 py-2 text-xs font-medium text-zinc-300 hover:bg-zinc-700 transition-colors"
+                type="button"
+                onClick={() => controlsRef.current?.resume()}
+                className={btnAccent}
               >
-                <X className="h-3.5 w-3.5" /> Cancel
+                <RotateCcw className="h-4 w-4" />
+                Retry
               </button>
             )}
 
-            {uploadState.status === 'completed' && (
-              <div className="flex items-center justify-between w-full">
-                <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
-                  <CheckCircle className="h-4 w-4" /> Upload completed successfully!
+            {(status === 'uploading' ||
+              status === 'paused' ||
+              status === 'error') && (
+              <button
+                type="button"
+                onClick={() => controlsRef.current?.abort()}
+                className={btnSecondary}
+              >
+                <X className="h-4 w-4" />
+                Cancel upload
+              </button>
+            )}
+
+            {status === 'completed' && (
+              <>
+                <span className="inline-flex items-center gap-2 text-sm font-medium text-cobalt">
+                  <Check className="h-4 w-4" />
+                  Upload complete
                 </span>
                 <button
+                  type="button"
                   onClick={() => controlsRef.current?.abort()}
-                  className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
+                  className={btnPrimary}
                 >
-                  Upload Another
+                  Upload another file
                 </button>
-              </div>
+              </>
             )}
           </div>
         </div>
       )}
-    </div>
+    </section>
   );
 }

@@ -1,12 +1,23 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
+import { Bricolage_Grotesque, Hanken_Grotesk } from 'next/font/google';
 import './globals.css';
 
-const inter = Inter({ subsets: ['latin'] });
+const display = Bricolage_Grotesque({
+  subsets: ['latin'],
+  variable: '--font-bricolage',
+  display: 'swap',
+});
+
+const sans = Hanken_Grotesk({
+  subsets: ['latin'],
+  variable: '--font-hanken',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
-  title: 'DFUP - Secure File Storage',
-  description: 'Secure, high-speed chunked file uploads built for scale.',
+  title: 'Vault: resumable file uploads',
+  description:
+    'Upload large files in pieces. Pause, resume, and only the missing pieces are sent.',
 };
 
 export default function RootLayout({
@@ -15,10 +26,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${inter.className} antialiased bg-zinc-950 text-zinc-50 selection:bg-blue-500/30 selection:text-blue-200`}>
-        {children}
-      </body>
+    <html lang="en" className={`${display.variable} ${sans.variable}`}>
+      <body className="bg-paper font-sans text-ink antialiased">{children}</body>
     </html>
   );
 }

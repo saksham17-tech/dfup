@@ -3,19 +3,13 @@
 import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import {
-  UploadCloud,
-  Folder,
-  Trash2,
-  LogOut,
-  Menu,
-  X,
-} from 'lucide-react';
+import { UploadCloud, Folder, Trash2, LogOut, Menu, X } from 'lucide-react';
 import { getSupabaseBrowser, hasPublicSupabaseConfig } from '@/lib/supabaseBrowser';
+import Wordmark from '@/components/Wordmark';
 
 const NAV = [
   { href: '/dashboard?view=upload', view: 'upload', label: 'Upload', icon: UploadCloud },
-  { href: '/dashboard?view=files', view: 'files', label: 'My Files', icon: Folder },
+  { href: '/dashboard?view=files', view: 'files', label: 'My files', icon: Folder },
   { href: '/dashboard?view=bin', view: 'bin', label: 'Bin', icon: Trash2 },
 ] as const;
 
@@ -28,7 +22,7 @@ function Shell({ children }: { children: React.ReactNode }) {
 
   const [email, setEmail] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false); // mobile drawer
 
   // Canonicalize /dashboard → /dashboard?view=upload
   useEffect(() => {
@@ -79,81 +73,98 @@ function Shell({ children }: { children: React.ReactNode }) {
 
   if (!ready) {
     return (
-      <div className="grid min-h-screen place-items-center bg-zinc-950 text-sm text-zinc-500">
-        Checking session…
+      <div className="grid min-h-screen place-items-center text-sm text-muted">
+        Checking your session…
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen bg-zinc-950 text-zinc-50">
+    <div className="min-h-screen md:flex">
+      {/* Mobile top bar */}
+      <header className="flex h-14 items-center justify-between border-b border-line bg-surface px-4 md:hidden">
+        <Link href="/" aria-label="Vault home">
+          <Wordmark className="text-lg" />
+        </Link>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="grid h-10 w-10 place-items-center rounded-md text-ink hover:bg-paper"
+          aria-label="Open menu"
+        >
+          <Menu className="h-5 w-5" />
+        </button>
+      </header>
+
+      {open && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          onClick={() => setOpen(false)}
+          className="fixed inset-0 z-30 bg-ink/40 md:hidden"
+        />
+      )}
+
       <aside
-        className={`flex shrink-0 flex-col transition-all duration-300 ease-in-out ${
-          open ? 'w-60 opacity-100' : 'w-0 overflow-hidden opacity-0'
+        className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-line bg-surface p-4 transition-transform motion-reduce:transition-none md:sticky md:top-0 md:h-screen md:translate-x-0 ${
+          open ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="m-3 flex h-[calc(100%-1.5rem)] w-[calc(15rem-0.25rem)] flex-col rounded-2xl border border-zinc-800/50 bg-zinc-900/70 p-3 backdrop-blur-xl">
-          <Link
-            href="/"
-            className="mb-5 flex items-center gap-2.5 px-2 font-semibold tracking-tight transition-all duration-200 hover:opacity-90"
-          >
-            <span className="grid h-8 w-8 place-items-center rounded-lg bg-white text-sm text-zinc-950">
-              V
-            </span>
-            Vault
+        <div className="mb-8 flex items-center justify-between px-2 pt-1">
+          <Link href="/" aria-label="Vault home">
+            <Wordmark />
           </Link>
-          <nav className="flex flex-1 flex-col gap-0.5">
-            {NAV.map((item) => {
-              const active = view === item.view;
-              const Icon = item.icon;
-              return (
-                <Link
-                  key={item.view}
-                  href={item.href}
-                  className={`flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm transition-all duration-200 ${
-                    active
-                      ? 'border-l-2 border-blue-400 bg-zinc-800/50 font-medium text-blue-400'
-                      : 'border-l-2 border-transparent text-zinc-400 hover:bg-zinc-800/30 hover:text-zinc-100'
-                  }`}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
-          <div className="mt-3 border-t border-zinc-800/60 pt-3">
-            <p className="truncate px-2 text-xs text-zinc-500" title={email ?? ''}>
-              {email}
-            </p>
-            <button
-              type="button"
-              onClick={logout}
-              className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-zinc-400 transition-all duration-200 hover:bg-zinc-800/40 hover:text-red-400"
-            >
-              <LogOut className="h-4 w-4" />
-              Logout
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="grid h-9 w-9 place-items-center rounded-md text-muted hover:bg-paper hover:text-ink md:hidden"
+            aria-label="Close menu"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <nav aria-label="Main" className="flex flex-1 flex-col gap-1">
+          {NAV.map((item) => {
+            const active = view === item.view;
+            const Icon = item.icon;
+            return (
+              <Link
+                key={item.view}
+                href={item.href}
+                onClick={() => setOpen(false)}
+                aria-current={active ? 'page' : undefined}
+                className={`flex min-h-10 items-center gap-3 rounded-md px-3 text-sm transition-colors motion-reduce:transition-none ${
+                  active
+                    ? 'bg-cobalt-soft font-medium text-cobalt'
+                    : 'text-muted hover:bg-paper hover:text-ink'
+                }`}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="border-t border-line pt-3">
+          <p className="truncate px-3 text-sm text-muted" title={email ?? ''}>
+            {email}
+          </p>
+          <button
+            type="button"
+            onClick={logout}
+            className="mt-1 flex min-h-10 w-full items-center gap-3 rounded-md px-3 text-sm text-muted transition-colors hover:bg-alert-soft hover:text-alert motion-reduce:transition-none"
+          >
+            <LogOut className="h-4 w-4" />
+            Sign out
+          </button>
         </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col transition-all duration-300">
-        <header className="flex h-14 items-center gap-3 border-b border-zinc-800/50 px-4 backdrop-blur-sm">
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="grid h-9 w-9 place-items-center rounded-xl text-zinc-400 transition-all duration-200 hover:bg-zinc-800/50 hover:text-zinc-100"
-            aria-label={open ? 'Collapse sidebar' : 'Open sidebar'}
-          >
-            {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-          </button>
-          <span className="text-sm font-medium text-zinc-300">Vault</span>
-        </header>
-        <main className="min-w-0 flex-1 px-6 py-6 transition-all duration-300">
-          {children}
-        </main>
-      </div>
+      <main className="min-w-0 flex-1 px-5 py-8 sm:px-10 sm:py-12">
+        {children}
+      </main>
     </div>
   );
 }
@@ -166,7 +177,7 @@ export default function DashboardLayout({
   return (
     <Suspense
       fallback={
-        <div className="grid min-h-screen place-items-center bg-zinc-950 text-sm text-zinc-500">
+        <div className="grid min-h-screen place-items-center text-sm text-muted">
           Loading…
         </div>
       }

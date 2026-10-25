@@ -1,7 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { Download, Trash2, RefreshCw, FileIcon } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Download, Trash2, RefreshCw, RotateCcw } from 'lucide-react';
+import {
+  btnDanger,
+  btnPrimary,
+  btnSecondary,
+  btnSmall,
+  formatBytes,
+  formatDate,
+} from '@/lib/ui';
 
 type Quota = {
   usedBytes: number;
@@ -15,45 +23,45 @@ type FileRow = {
   mimeType: string;
   storagePath: string | null;
   createdAt: string;
+  deletedAt?: string | null;
   downloadUrl: string | null;
 };
 
-function formatBytes(n: number) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
+type Pending = { file: FileRow; permanentOnly: boolean };
 
-function formatDate(iso: string) {
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
-  } catch {
-    return iso;
-  }
+function extension(name: string) {
+  const i = name.lastIndexOf('.');
+  return i > 0 && i < name.length - 1 ? name.slice(i + 1, i + 5).toLowerCase() : 'file';
 }
 
 type Props = {
-  compact?: boolean;
+  /** Heading shown above the list. Omit when the page already has an h1. */
+  title?: string;
+  /** Show only the newest N files. */
+  limit?: number;
   /** When true, list soft-deleted files and show restore/permanent actions */
   isBin?: boolean;
   refreshSignal?: number;
+  footer?: React.ReactNode;
 };
 
+const ROW_GRID =
+  'grid grid-cols-[2.5rem_minmax(0,1fr)_auto] items-center gap-x-3 sm:grid-cols-[2.5rem_minmax(0,1fr)_6rem_11rem_auto]';
+
 export default function FileDashboard({
-  compact = false,
+  title,
+  limit,
   isBin = false,
   refreshSignal = 0,
+  footer,
 }: Props) {
   const [quota, setQuota] = useState<Quota | null>(null);
   const [files, setFiles] = useState<FileRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<FileRow | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -84,206 +92,276 @@ export default function FileDashboard({
     refresh();
   }, [refresh, refreshSignal, isBin]);
 
-  async function moveToBin() {
+  // Dialog: focus Cancel on open, close on Escape
+  useEffect(() => {
     if (!pending) return;
+    cancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) setPending(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pending, busy]);
+
+  async function run(request: () => Promise<Response>, failure: string) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/upload/files/${pending.id}`, {
-        method: 'DELETE',
-      });
-      if (!res.ok) throw new Error((await res.text()) || 'Move to bin failed');
+      const res = await request();
+      if (!res.ok) throw new Error((await res.text()) || failure);
       setPending(null);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setPending(null);
     } finally {
       setBusy(false);
     }
   }
 
-  async function deletePermanent() {
-    if (!pending) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/upload/files/${pending.id}?permanent=true`,
-        { method: 'DELETE' },
-      );
-      if (!res.ok) throw new Error((await res.text()) || 'Delete failed');
-      setPending(null);
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const moveToBin = () =>
+    pending &&
+    run(
+      () => fetch(`/api/upload/files/${pending.file.id}`, { method: 'DELETE' }),
+      'Could not move the file to the bin',
+    );
 
-  const usedMb =
-    quota != null ? (quota.usedBytes / (1024 * 1024)).toFixed(2) : null;
+  const deletePermanent = () =>
+    pending &&
+    run(
+      () =>
+        fetch(`/api/upload/files/${pending.file.id}?permanent=true`, {
+          method: 'DELETE',
+        }),
+      'Could not delete the file',
+    );
+
+  const restore = (f: FileRow) =>
+    run(
+      () =>
+        fetch(`/api/upload/files/${f.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'restore' }),
+        }),
+      'Could not restore the file',
+    );
+
+  const visible = limit ? files.slice(0, limit) : files;
 
   return (
     <>
-      <section className="rounded-2xl border border-zinc-800/50 bg-zinc-900/70 p-5 shadow-sm backdrop-blur-xl">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="m-0 text-base font-medium text-zinc-100">
-            {isBin ? 'Bin' : compact ? 'Recent' : 'My files'}
-          </h2>
+      <section aria-label={title ?? (isBin ? 'Deleted files' : 'Files')}>
+        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            {title && (
+              <h2 className="font-display text-2xl font-semibold tracking-tight">
+                {title}
+              </h2>
+            )}
+            {!isBin && quota && (
+              <p className="mt-1 text-sm tabular-nums text-muted">
+                {formatBytes(quota.usedBytes)} used across {quota.fileCount}{' '}
+                {quota.fileCount === 1 ? 'file' : 'files'}
+              </p>
+            )}
+          </div>
           <button
             type="button"
             onClick={refresh}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"
+            className={`${btnSecondary} ${btnSmall}`}
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin motion-reduce:animate-none' : ''}`} />
             Refresh
           </button>
         </div>
 
-        {error && <p className="mb-3 text-sm text-red-400">{error}</p>}
-
-        {!isBin && quota && (
-          <p className="mb-4 text-sm text-zinc-500">
-            Storage Used: {usedMb} MB
-            {quota.fileCount
-              ? ` · ${quota.fileCount} file${quota.fileCount === 1 ? '' : 's'}`
-              : ''}
+        {error && (
+          <p
+            role="alert"
+            className="mb-4 rounded-md border border-alert/30 bg-alert-soft px-3 py-2 text-sm text-alert"
+          >
+            {error}
           </p>
         )}
 
-        {!loading && files.length === 0 && (
-          <p className="py-10 text-center text-sm text-zinc-600">
-            No files yet
+        {!loading && visible.length === 0 && !error && (
+          <div className="rounded-lg border border-dashed border-line px-6 py-12 text-center">
+            <p className="font-display text-lg font-semibold">
+              {isBin ? 'The bin is empty' : 'No files yet'}
+            </p>
+            <p className="mt-1 text-sm text-muted">
+              {isBin
+                ? 'Files you delete will wait here before they are removed.'
+                : 'Upload a file and it will show up here.'}
+            </p>
+          </div>
+        )}
+
+        {loading && visible.length === 0 && (
+          <p className="py-10 text-center text-sm text-muted" aria-busy="true">
+            Loading files…
           </p>
         )}
 
-        <ul className="m-0 list-none p-0">
-          {files.map((f) => (
-            <li
-              key={f.id}
-              className="flex items-center gap-3 rounded-xl border-b border-zinc-800/60 py-3 transition-all duration-200 last:border-0 hover:bg-zinc-800/30"
+        {visible.length > 0 && (
+          <div className="overflow-hidden rounded-lg border border-line bg-surface">
+            <div
+              className={`${ROW_GRID} hidden border-b border-line px-4 py-2 text-sm text-muted sm:grid`}
             >
-              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-zinc-800 text-zinc-400">
-                <FileIcon className="h-4 w-4" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div
-                  className="truncate text-sm font-medium text-zinc-100"
-                  title={f.filename}
-                >
-                  {f.filename}
-                </div>
-                <div className="mt-0.5 text-xs text-zinc-500">
-                  {formatBytes(f.totalSize)}
-                  {f.createdAt ? ` · ${formatDate(f.createdAt)}` : ''}
-                </div>
-              </div>
+              <span className="col-span-2">Name</span>
+              <span>Size</span>
+              <span>{isBin ? 'Deleted' : 'Added'}</span>
+              <span className="sr-only">Actions</span>
+            </div>
 
-              {isBin ? (
-              <>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(`/api/upload/files/${f.id}`, {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ action: 'restore' }),
-                      });
-                      if (!res.ok) throw new Error(await res.text());
-                      await refresh();
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : String(err));
-                    }
-                  }}
-                  className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-all duration-200 hover:bg-zinc-800"
-                >
-                  Restore
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const res = await fetch(
-                        `/api/upload/files/${f.id}?permanent=true`,
-                        { method: 'DELETE' },
-                      );
-                      if (!res.ok) throw new Error(await res.text());
-                      await refresh();
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : String(err));
-                    }
-                  }}
-                  className="rounded-lg bg-red-500/10 px-3 py-1.5 text-sm text-red-500 transition-all duration-200 hover:bg-red-500/20"
-                >
-                  Delete
-                </button>
-              </>
-            ) : (
-              <>
-                <a
-                  href={`/api/upload/files/${f.id}/download`}
-                  className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
-                  title="Download"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                </a>
-                <button
-                  type="button"
-                  onClick={() => setPending(f)}
-                  title="Delete"
-                  className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 transition-colors hover:border-red-900 hover:bg-red-950/40 hover:text-red-400"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </>
-            )}
-            </li>
-          ))}
-        </ul>
+            <ul className="m-0 list-none p-0">
+              {visible.map((f) => {
+                const when = isBin && f.deletedAt ? f.deletedAt : f.createdAt;
+                return (
+                  <li
+                    key={f.id}
+                    className={`${ROW_GRID} gap-y-0 border-b border-line px-4 py-3 last:border-b-0`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="grid h-10 w-10 place-items-center rounded-md bg-paper text-xs font-medium text-muted"
+                    >
+                      {extension(f.filename)}
+                    </span>
+
+                    <div className="min-w-0">
+                      <p
+                        className="truncate text-sm font-medium"
+                        title={f.filename}
+                      >
+                        {f.filename}
+                      </p>
+                      <p className="mt-0.5 text-xs tabular-nums text-muted sm:hidden">
+                        {formatBytes(f.totalSize)}
+                        {when ? `, ${formatDate(when)}` : ''}
+                      </p>
+                    </div>
+
+                    <span className="hidden text-sm tabular-nums text-muted sm:block">
+                      {formatBytes(f.totalSize)}
+                    </span>
+                    <span className="hidden text-sm tabular-nums text-muted sm:block">
+                      {when ? formatDate(when) : ''}
+                    </span>
+
+                    <div className="flex items-center gap-2">
+                      {isBin ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => restore(f)}
+                            className={`${btnSecondary} ${btnSmall}`}
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            Restore
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              setPending({ file: f, permanentOnly: true })
+                            }
+                            aria-label={`Delete ${f.filename} permanently`}
+                            className={`${btnDanger} ${btnSmall}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span className="hidden sm:inline">Delete</span>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <a
+                            href={`/api/upload/files/${f.id}/download`}
+                            aria-label={`Download ${f.filename}`}
+                            className={`${btnSecondary} ${btnSmall}`}
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            <span className="hidden sm:inline">Download</span>
+                          </a>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPending({ file: f, permanentOnly: false })
+                            }
+                            aria-label={`Delete ${f.filename}`}
+                            className={`${btnSecondary} ${btnSmall} hover:border-alert/40 hover:text-alert`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        {footer && visible.length > 0 && <div className="mt-4">{footer}</div>}
       </section>
 
       {pending && (
         <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
+          className="fixed inset-0 z-50 grid place-items-center bg-ink/50 p-4"
+          onClick={() => !busy && setPending(null)}
         >
-          <div className="w-full max-w-md rounded-2xl border border-zinc-800/60 bg-zinc-900/90 p-6 shadow-2xl backdrop-blur-xl">
-            <h3 className="text-lg font-medium text-zinc-50">Delete file</h3>
-            <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-              Are you sure you want to delete this permanently? Your data will
-              not be retrieved.
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-title"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-lg border border-line bg-surface p-6 shadow-xl"
+          >
+            <h3
+              id="delete-title"
+              className="font-display text-xl font-semibold tracking-tight"
+            >
+              {pending.permanentOnly ? 'Delete permanently?' : 'Delete this file?'}
+            </h3>
+            <p className="mt-1 truncate text-sm font-medium" title={pending.file.filename}>
+              {pending.file.filename}
             </p>
-            <p className="mt-2 truncate text-sm font-medium text-zinc-200">
-              {pending.filename}
+            <p className="mt-3 text-sm leading-relaxed text-muted">
+              {pending.permanentOnly
+                ? 'This removes the file now. It can’t be restored.'
+                : 'Move to bin keeps the file for 5 days so you can restore it. Delete permanently removes it now and can’t be undone.'}
             </p>
-            <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
+                ref={cancelRef}
                 type="button"
                 disabled={busy}
                 onClick={() => setPending(null)}
-                className="rounded-lg border border-zinc-700/80 px-4 py-2 text-sm text-zinc-300 transition-all duration-200 hover:bg-zinc-800 disabled:opacity-50"
+                className={btnSecondary}
               >
                 Cancel
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={moveToBin}
-                className="rounded-lg bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-950 transition-all duration-200 hover:bg-white disabled:opacity-50"
-              >
-                {busy ? '…' : 'Move to Bin'}
-              </button>
+              {!pending.permanentOnly && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={moveToBin}
+                  className={btnPrimary}
+                >
+                  {busy ? 'Working…' : 'Move to bin'}
+                </button>
+              )}
               <button
                 type="button"
                 disabled={busy}
                 onClick={deletePermanent}
-                className="rounded-lg bg-red-500/10 px-4 py-2 text-sm font-medium text-red-500 transition-all duration-200 hover:bg-red-500/20 disabled:opacity-50"
+                className={btnDanger}
               >
-                {busy ? '…' : 'Delete Permanently'}
+                {busy ? 'Working…' : 'Delete permanently'}
               </button>
             </div>
           </div>

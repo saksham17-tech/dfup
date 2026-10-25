@@ -3,6 +3,14 @@
 import { FormEvent, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSupabaseBrowser, hasPublicSupabaseConfig } from '@/lib/supabaseBrowser';
+import Wordmark from '@/components/Wordmark';
+import ChunkStrip, { buildCells } from '@/components/ChunkStrip';
+import { btnPrimary, btnSecondary, inputClass } from '@/lib/ui';
+
+const PANEL_CELLS = buildCells(
+  40,
+  Array.from({ length: 27 }, (_, i) => i),
+);
 
 export default function LoginPage() {
   const router = useRouter();
@@ -24,7 +32,7 @@ export default function LoginPage() {
       if (mode === 'signup') {
         const { error: signErr } = await supabase.auth.signUp({ email, password });
         if (signErr) throw signErr;
-        setInfo('Check your inbox to confirm, or sign in if confirmations are off.');
+        setInfo('Check your inbox to confirm your email, or sign in if confirmations are off.');
       } else {
         const { error: signErr } = await supabase.auth.signInWithPassword({
           email,
@@ -59,90 +67,110 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="grid min-h-screen place-items-center bg-zinc-950 px-4 text-zinc-100">
-      <div className="w-full max-w-sm rounded-2xl border border-zinc-800/50 bg-zinc-900/70 p-8 shadow-2xl backdrop-blur-xl">
-        <div className="mb-6 flex items-center gap-2 font-semibold tracking-tight">
-          <span className="grid h-8 w-8 place-items-center rounded-lg bg-zinc-100 text-sm text-zinc-950">
-            V
-          </span>
-          Vault
-        </div>
-        <h1 className="text-xl font-medium text-zinc-50">
-          {mode === 'signin' ? 'Sign in' : 'Create account'}
-        </h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Continue with Google or email
-        </p>
-
-        {!configured && (
-          <p className="mt-4 rounded-lg border border-amber-900/50 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
-            Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in
-            .env.local
+    <div className="grid min-h-screen md:grid-cols-[5fr_6fr]">
+      <aside className="hidden flex-col justify-between bg-ink p-10 text-paper md:flex">
+        <Wordmark />
+        <div>
+          <p className="max-w-sm font-display text-4xl font-semibold leading-tight tracking-tight">
+            Large files, uploaded in pieces you can pause.
           </p>
-        )}
-
-        <button
-          type="button"
-          onClick={signInGoogle}
-          disabled={busy || !configured}
-          className="mt-6 w-full rounded-lg bg-zinc-100 py-2.5 text-sm font-medium text-zinc-950 transition-all duration-200 hover:scale-[1.02] hover:bg-white disabled:opacity-50"
-        >
-          Sign in with Google
-        </button>
-
-        <div className="my-5 flex items-center gap-3 text-xs uppercase tracking-wide text-zinc-600">
-          <span className="h-px flex-1 bg-zinc-800" />
-          or
-          <span className="h-px flex-1 bg-zinc-800" />
+          <div className="mt-8 max-w-sm">
+            <ChunkStrip tone="dark" tall cells={PANEL_CELLS} />
+          </div>
         </div>
+        <p className="text-sm text-paper/60">4 MB pieces, checked on arrival.</p>
+      </aside>
 
-        <form onSubmit={onSubmit} className="space-y-3">
-          <label className="block text-sm">
-            <span className="text-zinc-500">Email</span>
-            <input
-              type="email"
-              required
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-zinc-500"
-            />
-          </label>
-          <label className="block text-sm">
-            <span className="text-zinc-500">Password</span>
-            <input
-              type="password"
-              required
-              minLength={6}
-              autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-zinc-100 outline-none focus:border-zinc-500"
-            />
-          </label>
-          {error && <p className="text-sm text-red-400">{error}</p>}
-          {info && <p className="text-sm text-green-400">{info}</p>}
+      <main className="flex items-center justify-center px-5 py-12">
+        <div className="w-full max-w-sm">
+          <Wordmark className="mb-10 md:hidden" />
+          <h1 className="font-display text-3xl font-semibold tracking-tight">
+            {mode === 'signin' ? 'Sign in to Vault' : 'Create your account'}
+          </h1>
+
+          {!configured && (
+            <p
+              role="alert"
+              className="mt-5 rounded-md border border-alert/30 bg-alert-soft px-3 py-2 text-sm text-alert"
+            >
+              Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to
+              .env.local, then restart the dev server.
+            </p>
+          )}
+
           <button
-            type="submit"
+            type="button"
+            onClick={signInGoogle}
             disabled={busy || !configured}
-            className="w-full rounded-lg border border-zinc-700 py-2.5 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-800 disabled:opacity-50"
+            className={`${btnSecondary} mt-7 w-full`}
           >
-            {busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}
+            Continue with Google
           </button>
-        </form>
 
-        <button
-          type="button"
-          className="mt-4 text-sm text-zinc-500 hover:text-zinc-300"
-          onClick={() => {
-            setMode(mode === 'signin' ? 'signup' : 'signin');
-            setError(null);
-            setInfo(null);
-          }}
-        >
-          {mode === 'signin' ? 'Need an account? Sign up' : 'Have an account? Sign in'}
-        </button>
-      </div>
+          <div className="my-6 flex items-center gap-3 text-sm text-muted">
+            <span className="h-px flex-1 bg-line" />
+            or use email
+            <span className="h-px flex-1 bg-line" />
+          </div>
+
+          <form onSubmit={onSubmit} className="space-y-4">
+            <label className="block text-sm font-medium">
+              Email
+              <input
+                type="email"
+                required
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className={inputClass}
+              />
+            </label>
+            <label className="block text-sm font-medium">
+              Password
+              <input
+                type="password"
+                required
+                minLength={6}
+                autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className={inputClass}
+              />
+            </label>
+            {error && (
+              <p role="alert" className="text-sm text-alert">
+                {error}
+              </p>
+            )}
+            {info && (
+              <p role="status" className="text-sm text-cobalt">
+                {info}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={busy || !configured}
+              className={`${btnPrimary} w-full`}
+            >
+              {busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}
+            </button>
+          </form>
+
+          <button
+            type="button"
+            className="mt-5 text-sm text-muted underline-offset-4 hover:text-ink hover:underline"
+            onClick={() => {
+              setMode(mode === 'signin' ? 'signup' : 'signin');
+              setError(null);
+              setInfo(null);
+            }}
+          >
+            {mode === 'signin'
+              ? 'New here? Create an account'
+              : 'Already have an account? Sign in'}
+          </button>
+        </div>
+      </main>
     </div>
   );
 }

@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import FileUploader from './FileUploader';
 import FileDashboard from './FileDashboard';
 
@@ -9,39 +10,54 @@ export default function DashboardClient() {
   const searchParams = useSearchParams();
   const rawView = searchParams.get('view');
   const view = rawView === 'files' || rawView === 'bin' ? rawView : 'upload';
-  
+
   const [refreshSignal, setRefreshSignal] = useState(0);
 
-  const handleUploadSuccess = () => {
+  const handleUploadSuccess = useCallback(() => {
     setRefreshSignal((prev) => prev + 1);
-  };
+  }, []);
 
   return (
-    <div className="mx-auto max-w-5xl space-y-8 p-6">
+    <div className="mx-auto max-w-4xl">
       {view === 'upload' && (
-        <div className="space-y-8 transition-all duration-300">
+        <div className="space-y-14">
+          <h1 className="sr-only">Upload</h1>
           <FileUploader onSuccess={handleUploadSuccess} />
-          <div className="pt-4">
-            <h2 className="mb-4 text-lg font-medium text-zinc-200">Recent Files</h2>
-            <FileDashboard refreshSignal={refreshSignal} isBin={false} />
-          </div>
+          <FileDashboard
+            title="Recent files"
+            limit={5}
+            refreshSignal={refreshSignal}
+            footer={
+              <Link
+                href="/dashboard?view=files"
+                className="text-sm font-medium text-cobalt underline-offset-4 hover:underline"
+              >
+                See all files
+              </Link>
+            }
+          />
         </div>
       )}
 
       {view === 'files' && (
-        <div className="transition-all duration-300">
-          <h1 className="mb-6 text-2xl font-semibold text-zinc-100">My Files</h1>
-          <FileDashboard refreshSignal={refreshSignal} isBin={false} />
+        <div>
+          <h1 className="mb-8 font-display text-4xl font-semibold tracking-tight">
+            My files
+          </h1>
+          <FileDashboard refreshSignal={refreshSignal} />
         </div>
       )}
 
       {view === 'bin' && (
-        <div className="transition-all duration-300">
-          <h1 className="mb-2 text-2xl font-semibold text-zinc-100">Trash Bin</h1>
-          <p className="mb-6 text-sm text-zinc-400">
-            Files in the bin are automatically deleted after 5 days.
+        <div>
+          <h1 className="font-display text-4xl font-semibold tracking-tight">
+            Bin
+          </h1>
+          <p className="mb-8 mt-2 max-w-prose text-muted">
+            Files in the bin are deleted automatically after 5 days. Restore
+            one before then, or delete it permanently now.
           </p>
-          <FileDashboard refreshSignal={refreshSignal} isBin={true} />
+          <FileDashboard isBin refreshSignal={refreshSignal} />
         </div>
       )}
     </div>
