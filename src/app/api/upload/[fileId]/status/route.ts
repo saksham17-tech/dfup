@@ -25,20 +25,28 @@ export async function GET(
     }
 
     const uploadedChunks = new Set<number>();
+    const checksums: Record<string, string> = {};
     for (let offset = 0; ; offset += 1000) {
       const { data: rows, error } = await supabase
-        .from('file_chunks').select('chunk_index').eq('file_id', fileId)
+        .from('file_chunks').select('chunk_index, checksum').eq('file_id', fileId)
         .order('chunk_index', { ascending: true }).range(offset, offset + 999);
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-      for (const row of rows ?? []) uploadedChunks.add(Number(row.chunk_index));
+      for (const row of rows ?? []) {
+        const index = Number(row.chunk_index);
+        if (!Number.isInteger(index) || index < 0 || index >= file.total_chunks) continue;
+        uploadedChunks.add(index);
+        checksums[String(index)] = String(row.checksum ?? '');
+      }
       if (!rows || rows.length < 1000) break;
     }
 
+    console.info(`[upload] status ${fileId}: ${uploadedChunks.size}/${file.total_chunks} pieces on the server`);
     return NextResponse.json(
       {
         status: file.status,
         totalChunks: file.total_chunks,
         uploadedChunks: [...uploadedChunks],
+        checksums,
       },
       { headers: { 'Cache-Control': 'no-store' } },
     );

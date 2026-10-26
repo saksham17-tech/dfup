@@ -3,7 +3,7 @@ import { getSupabaseServer } from '@/lib/supabaseServer';
 
 /**
  * GET /api/upload/usage/quota
- * Active (non-bin, non-failed) storage only.
+ * Completed, non-bin files only, matching the file list.
  */
 export async function GET() {
   try {
@@ -12,7 +12,7 @@ export async function GET() {
     const { data: rows, error } = await supabase
       .from('files')
       .select('total_size')
-      .neq('status', 'FAILED')
+      .eq('status', 'COMPLETED')
       .is('deleted_at', null);
 
     if (error) {
@@ -31,7 +31,7 @@ export async function GET() {
     return NextResponse.json({
       usedBytes,
       fileCount: rows?.length ?? 0,
-    });
+    }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err) {
     console.error('quota error', err);
     return NextResponse.json(

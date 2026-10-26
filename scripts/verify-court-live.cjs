@@ -10,6 +10,8 @@ if (!process.argv.includes('--run-live'))
     'Use --run-live to create, verify and remove a synthetic 104 MB upload.',
   );
 const origin = 'http://127.0.0.1:3001';
+const accessToken = process.env.UPLOAD_TEST_ACCESS_TOKEN;
+if (!accessToken) throw new Error('Set UPLOAD_TEST_ACCESS_TOKEN to a signed-in Supabase user access token before this live test. Apply supabase/upload-ownership.sql first.');
 const { createUploadBridge } = loadTs('src/lib/court/uploadBridge.ts');
 const { createShots } = loadTs('src/lib/court/shots.ts');
 const bridge = createUploadBridge(),
@@ -101,7 +103,7 @@ controls = moduleUnderTest.createUploader((update) => {
   }
   if (state.status === 'error') rejectDone(new Error(state.error));
   if (state.status === 'completed') resolveDone();
-});
+}, async () => accessToken);
 
 async function main() {
   const bytes = Buffer.alloc(104 * 1024 * 1024);
@@ -147,7 +149,7 @@ async function main() {
   } finally {
     clearTimeout(timeout);
     clearInterval(timer);
-    controls.abort();
+    controls.abort(false);
     assert.equal(shots.state.settled, 0);
     assert.equal(shots.state.queued, 0);
     if (fileId) {

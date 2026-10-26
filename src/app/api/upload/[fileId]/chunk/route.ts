@@ -108,6 +108,16 @@ export async function POST(
       );
     }
 
+    // Cancel may have claimed/deleted the parent while Storage was accepting data.
+    const { data: current, error: currentError } = await supabase.from('files')
+      .select('id, deleted_at').eq('id', fileId).single();
+    if (currentError || !current || current.deleted_at) {
+      if (!current || current.deleted_at) {
+        await supabase.storage.from(STORAGE_BUCKET).remove([objectPath]);
+      }
+      return NextResponse.json({ error: 'Upload is no longer available' }, { status: 409 });
+    }
+
     // ── 2. Upsert metadata (idempotent) ──────────────────────────────────
     const { error: upsertErr } = await supabase.from('file_chunks').upsert(
       {
@@ -154,7 +164,9 @@ export async function POST(
     let completed = false;
     let storagePath: string | null = null;
 
-    if (uploadedCount >= file.total_chunks) {
+    // The client verifies reused pieces first and explicitly completes after all
+    // replacements finish. Old metadata must not finalize a partially replaced file.
+    if (uploadedCount >= file.total_chunks && req.nextUrl.searchParams.get('deferCompletion') !== '1') {
       try {
         const result = await completeChunkUpload(supabase, fileId);
         storagePath = result.storagePath;

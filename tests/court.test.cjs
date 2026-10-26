@@ -265,6 +265,7 @@ test('the real compact uploader renders one saved status and replaces it for fin
       '@/lib/upload': { CHUNK_SIZE: 4 * 1024 * 1024, MAX_CONCURRENT_UPLOADS: 4 },
       '@/lib/court/uploadBridge': { uploadBridge: createUploadBridge() },
       '@/lib/ui': loadTs('src/lib/ui.ts'),
+      '@/lib/supabaseBrowser': {},
       'lucide-react': Object.fromEntries(['Pause', 'Play', 'X', 'RotateCcw', 'Minus', 'Maximize2'].map(name => [name, () => null])),
       './CourtProgress': progress,
     });

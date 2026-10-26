@@ -9,8 +9,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-function clientFixture({ saved = [0], chunks = 1, complete } = {}) {
-  const updates = [], calls = [], stored = new Set(saved);
+function clientFixture({ saved = [0], chunks = 1, complete, resumed = false, checksums = {}, forget = false } = {}) {
+  const updates = [], calls = [], fetchCalls = [], stored = new Set(saved);
   const file = new File([Buffer.alloc(chunks === 1 ? 12 : 4 * 1024 * 1024 + 12)], 'sample.bin');
   const axios = {
     isCancel: (error) => error?.code === 'ERR_CANCELED',
@@ -22,17 +22,21 @@ function clientFixture({ saved = [0], chunks = 1, complete } = {}) {
       assert.ok(body.get('chunk') instanceof Blob);
       assert.ok(options.signal instanceof AbortSignal);
       options.onUploadProgress({ loaded: body.get('chunk').size, total: body.get('chunk').size });
-      stored.add(index);
+      if (!forget) stored.add(index);
+      checksums[String(index)] = new URL(url, 'http://localhost').searchParams.get('checksum');
       return { data: { ok: true } };
     },
   };
   const uploader = loadTs('src/lib/upload.ts', { axios }, {
-    fetch: async (url) => new Response(JSON.stringify(url.endsWith('/init') ? { fileId: 'test-file' }
-      : { status: 'FAILED', totalChunks: chunks, uploadedChunks: [...stored] })),
+    fetch: async (url, init) => {
+      fetchCalls.push({ url, init });
+      return new Response(JSON.stringify(url.endsWith('/init') ? { fileId: 'test-file', resumed }
+        : { status: 'FAILED', totalChunks: chunks, uploadedChunks: [...stored], checksums }));
+    },
     requestAnimationFrame: (callback) => setImmediate(callback),
     cancelAnimationFrame: clearImmediate,
   }).createUploader((update) => updates.push(update));
-  return { uploader, updates, calls, file };
+  return { uploader, updates, calls, fetchCalls, file };
 }
 
 test('an upload with all saved pieces waits for explicit server confirmation, even after FAILED', async () => {
@@ -71,7 +75,7 @@ test('pending pieces upload before completion and the final saved-piece readout 
   const f = clientFixture({ chunks: 2, saved: [0] });
   await f.uploader.start(f.file);
   assert.equal(f.calls.length, 2);
-  assert.match(f.calls[0], /chunk\?chunkIndex=1&checksum=[a-f0-9]{64}$/);
+  assert.match(f.calls[0], /chunk\?chunkIndex=1&checksum=[a-f0-9]{64}&deferCompletion=1$/);
   assert.equal(f.calls[1], '/api/upload/test-file/complete');
   const processing = f.updates.find((update) => update.status === 'processing');
   assert.deepEqual(processing.uploadedChunks, [0, 1]);
@@ -106,9 +110,122 @@ test('resuming cannot let a previous paused confirmation overwrite the new run',
   await entered.promise;
   f.uploader.pause();
   assert.equal(f.updates.at(-1).status, 'paused');
-  await f.uploader.resume();
+  const resumed = f.uploader.resume();
+  gate.resolve();
+  await resumed;
   assert.equal(f.updates.at(-1).status, 'completed');
   const updateCount = f.updates.length;
   gate.resolve(); await firstRun;
   assert.equal(f.updates.length, updateCount);
+});
+
+test('reselected uploads verify saved checksums before skipping pieces', async () => {
+  const { createHash } = require('node:crypto');
+  const checksum = createHash('sha256').update(Buffer.alloc(4 * 1024 * 1024)).digest('hex');
+  for (const matched of [true, false]) {
+    const f = clientFixture({ chunks: 2, resumed: true, checksums: { '0': matched ? checksum : 'different-content' } });
+    await f.uploader.start(f.file);
+    const sent = f.calls.filter(url => url.includes('/chunk?')).map(url => Number(new URL(url, 'http://local').searchParams.get('chunkIndex'))).sort();
+    assert.deepEqual(sent, matched ? [1] : [0, 1]);
+    assert.equal(f.updates.at(-1).status, 'completed');
+    assert.ok(f.updates.some(update => update.fileId === 'test-file' && update.status === 'init'));
+  }
+});
+
+test('missing server pieces after the pool produce a Retry error instead of completing', async () => {
+  const f = clientFixture({ saved: [], forget: true });
+  await f.uploader.start(f.file);
+  assert.equal(f.updates.at(-1).status, 'error');
+  assert.match(f.updates.at(-1).error, /missing pieces.*Retry/);
+  assert.ok(!f.calls.some(url => url.endsWith('/complete')));
+});
+
+test('abort(false) preserves saved pieces; Cancel uses keepalive DELETE', async () => {
+  for (const discard of [true, false]) {
+    const f = clientFixture(); await f.uploader.start(f.file);
+    f.uploader.abort(discard);
+    await new Promise(resolve => setImmediate(resolve));
+    const deletes = f.fetchCalls.filter(call => call.init?.method === 'DELETE');
+    assert.equal(deletes.length, discard ? 1 : 0);
+    if (discard) { assert.equal(deletes[0].url, '/api/upload/test-file'); assert.equal(deletes[0].init.keepalive, true); }
+  }
+});
+
+test('104 MB pause at 40% then immediate Resume waits for the old pool and sends only missing indices', async () => {
+  const stored = new Set(), calls = [], statuses = [], updates = [];
+  const paused = deferred(), unwind = deferred();
+  let controls, resumeTask, didPause = false, firstPool = true, active = 0, maxActive = 0;
+  const file = new File([Buffer.alloc(104 * 1024 * 1024)], 'throttled-104MB.bin');
+  const axios = {
+    isCancel: error => error?.code === 'ERR_CANCELED', isAxiosError: () => false,
+    async post(url, body, options) {
+      if (url.endsWith('/complete')) return { data: { completed: true } };
+      const index = Number(new URL(url, 'http://localhost').searchParams.get('chunkIndex'));
+      calls.push({ index, pool: firstPool ? 'first' : 'resumed' });
+      active++; maxActive = Math.max(maxActive, active);
+      try {
+        if (firstPool && index >= 10) await new Promise((resolve, reject) => {
+          const abort = () => unwind.promise.then(() => {
+            // One request reached Storage even though its response was cancelled.
+            if (index === 10) stored.add(index);
+            reject(Object.assign(new Error('Upload paused or cancelled'), { code: 'ERR_CANCELED' }));
+          });
+          if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, { once: true });
+        });
+        await new Promise(resolve => setImmediate(resolve));
+        stored.add(index);
+        options.onUploadProgress({ loaded: body.get('chunk').size, total: body.get('chunk').size });
+        return { data: { ok: true } };
+      } finally { active--; }
+    },
+  };
+  const module = loadTs('src/lib/upload.ts', { axios }, {
+    fetch: async (url, options) => {
+      if (url.endsWith('/init')) {
+        assert.equal(options.headers.Authorization, 'Bearer test-session');
+        return Response.json({ fileId: 'large-test' });
+      }
+      assert.equal(options.cache, 'no-store');
+      const indices = [...stored].sort((a,b) => a-b); statuses.push(indices);
+      return Response.json({ status: 'UPLOADING', totalChunks: 26, uploadedChunks: indices });
+    },
+    requestAnimationFrame: callback => setImmediate(callback), cancelAnimationFrame: clearImmediate,
+  });
+  controls = module.createUploader(update => {
+    updates.push(update);
+    if (!didPause && update.uploadedChunks?.length >= 10) {
+      didPause = true; controls.pause(); resumeTask = controls.resume(); paused.resolve();
+    }
+  }, async () => 'test-session');
+  const initial = controls.start(file);
+  await paused.promise;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(statuses.length, 1, 'Resume must not query status before the previous pool drains');
+  assert.equal(calls.filter(call => call.pool === 'resumed').length, 0);
+  firstPool = false; unwind.resolve();
+  await initial; await resumeTask;
+  assert.deepEqual(statuses[1], Array.from({ length: 11 }, (_, i) => i));
+  assert.deepEqual(calls.filter(call => call.pool === 'resumed').map(call => call.index).sort((a,b)=>a-b), Array.from({length:15},(_,i)=>i+11));
+  assert.ok(maxActive <= 5); assert.equal(updates.at(-1).status, 'completed');
+  assert.ok(!updates.some(update => update.status === 'error'));
+});
+
+test('Cancel during init discards the late-created ID; navigation preserves it', async () => {
+  for (const discard of [true, false]) {
+    const entered = deferred(), gate = deferred(), calls = [];
+    const module = loadTs('src/lib/upload.ts', {axios:{}}, {
+      fetch: async (url, options) => {
+        calls.push({url,options});
+        if (url.endsWith('/init')) { entered.resolve(); await gate.promise; return Response.json({fileId:'late-init'}); }
+        assert.equal(options.method, 'DELETE'); return Response.json({ok:true});
+      },
+    });
+    const controls = module.createUploader(()=>{}, async ()=>'signed-in');
+    const run = controls.start(new File(['content'],'late.bin'));
+    await entered.promise; controls.abort(discard); gate.resolve(); await run;
+    await new Promise(resolve=>setImmediate(resolve));
+    const deletion = calls.find(call=>call.options.method === 'DELETE');
+    assert.equal(Boolean(deletion), discard);
+    if (discard) { assert.equal(deletion.url,'/api/upload/late-init'); assert.equal(deletion.options.headers.Authorization,'Bearer signed-in'); }
+  }
 });

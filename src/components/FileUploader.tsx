@@ -11,6 +11,7 @@ import {
 import { Pause, Play, X, RotateCcw, Minus, Maximize2 } from 'lucide-react';
 import CourtProgress from './CourtProgress';
 import { uploadBridge } from '@/lib/court/uploadBridge';
+import { getSupabaseBrowser } from '@/lib/supabaseBrowser';
 import { btnAccent, btnPrimary, btnSecondary, formatBytes } from '@/lib/ui';
 
 const PIECE_MB = CHUNK_SIZE / (1024 * 1024);
@@ -47,8 +48,11 @@ export default function FileUploader({
       if (newState.status === 'completed') {
         onSuccessRef.current?.();
       }
+    }, async () => {
+      const { data } = await getSupabaseBrowser().auth.getSession();
+      return data.session?.access_token ?? null;
     });
-    return () => controlsRef.current?.abort();
+    return () => controlsRef.current?.abort(false);
   }, []);
 
   const startFile = async (file: File) => {
@@ -142,7 +146,7 @@ export default function FileUploader({
               : <span role="progressbar" aria-label="Upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} className="px-1 text-sm font-semibold tabular-nums">{Math.round(progress)}%</span>}
             {status === 'uploading' || status === 'paused' ? <button type="button" aria-label={status === 'paused' ? 'Resume upload' : 'Pause upload'} className={`${btnSecondary} upload-action upload-icon`} onClick={() => status === 'paused' ? controlsRef.current?.resume() : controlsRef.current?.pause()}>{status === 'paused' ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}</button> : null}
             {cancel}
-            {status === 'completed' && <button type="button" aria-label="Upload another file" title="Upload another file" className={`${btnSecondary} upload-action upload-icon`} onClick={() => controlsRef.current?.abort()}><RotateCcw className="h-3.5 w-3.5" /></button>}
+            {status === 'completed' && <button type="button" aria-label="Upload another file" title="Upload another file" className={`${btnSecondary} upload-action upload-icon`} onClick={() => controlsRef.current?.abort(false)}><RotateCcw className="h-3.5 w-3.5" /></button>}
             <button type="button" aria-label="Expand upload bar" title="Expand upload bar" className={`${btnSecondary} upload-action upload-icon`} onClick={toggleMinimized}><Maximize2 className="h-3.5 w-3.5" /></button>
             <span className="sr-only" aria-live="polite">{status === 'idle' ? 'Drop a file anywhere or choose file' : statusText}</span>
           </>
@@ -162,7 +166,7 @@ export default function FileUploader({
                 <span className="mr-1 text-sm font-semibold tabular-nums">{Math.round(progress)}%</span>
                 {pauseResume}
                 {canRetry && <button type="button" className={`${btnAccent} upload-action`} onClick={() => controlsRef.current?.resume()}><RotateCcw className="h-3.5 w-3.5" />Retry</button>}
-                {status === 'completed' && <button type="button" className={`${btnSecondary} upload-action`} onClick={() => controlsRef.current?.abort()}><RotateCcw className="h-3.5 w-3.5" /><span>Upload another file</span></button>}
+                {status === 'completed' && <button type="button" className={`${btnSecondary} upload-action`} onClick={() => controlsRef.current?.abort(false)}><RotateCcw className="h-3.5 w-3.5" /><span>Upload another file</span></button>}
                 {cancel}
                 <button type="button" aria-label="Minimize upload bar" title="Minimize upload bar" className={`${btnSecondary} upload-action upload-icon`} onClick={toggleMinimized}><Minus className="h-3.5 w-3.5" /></button>
               </div>

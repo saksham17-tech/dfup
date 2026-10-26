@@ -37,7 +37,7 @@ export type UploadControls = {
   start: (file: File) => Promise<void>;
   pause: () => void;
   resume: () => Promise<void>;
-  abort: () => void;
+  abort: (discard?: boolean) => void;
 };
 
 type ChunkMeta = {
@@ -77,10 +77,10 @@ export function sliceFile(file: File) {
   return { totalChunks, chunks };
 }
 
-async function apiInit(file: File, totalChunks: number) {
+async function apiInit(file: File, totalChunks: number, token: string | null) {
   const res = await fetch(`${API}/init`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify({
       filename: file.name,
       totalSize: file.size,
@@ -93,7 +93,7 @@ async function apiInit(file: File, totalChunks: number) {
     const text = await res.text();
     throw new Error(text || `Init failed (${res.status})`);
   }
-  return res.json() as Promise<{ fileId: string }>;
+  return res.json() as Promise<{ fileId: string; resumed?: boolean }>;
 }
 
 async function apiStatus(fileId: string) {
@@ -103,6 +103,7 @@ async function apiStatus(fileId: string) {
     status: string;
     totalChunks: number;
     uploadedChunks: number[];
+    checksums?: Record<string, string>;
   }>;
 }
 
@@ -138,7 +139,7 @@ async function apiChunkOnce(
 
   try {
     const res = await axios.post(
-      `${API}/${fileId}/chunk?chunkIndex=${chunkIndex}&checksum=${checksum}`,
+      `${API}/${fileId}/chunk?chunkIndex=${chunkIndex}&checksum=${checksum}&deferCompletion=1`,
       form,
       {
         timeout: CHUNK_TIMEOUT_MS,
@@ -296,24 +297,39 @@ async function runPool<T>(
  */
 export function createUploader(
   onUpdate: (state: Partial<UploadState>) => void,
+  accessToken: () => Promise<string | null> = async () => null,
 ): UploadControls {
   let aborted = false;
   let paused = false;
-  let currentFile: File | null = null;
-  let fileId: string | null = null;
   let poolController: AbortController | null = null;
   let generation = 0;
+  let pendingRun: Promise<void> = Promise.resolve();
+  type Selection = { file: File; id: string | null; token: string | null; verify: boolean; hashes: Map<number, string> };
+  let selection: Selection | null = null;
 
   const set = (partial: Partial<UploadState>) => onUpdate(partial);
   const isUserAbort = () => aborted || paused;
 
-  async function uploadMissing(file: File, id: string, run: number) {
+  async function uploadMissing(file: File, id: string, run: number, selected: Selection) {
     const shouldStop = () => isUserAbort() || run !== generation;
     const { chunks } = sliceFile(file);
     const status = await apiStatus(id);
     if (shouldStop()) return;
     if (status.totalChunks !== chunks.length) throw new Error('The stored upload does not match this file. Upload the file again.');
-    const completed = new Set<number>(status.uploadedChunks);
+    const completed = new Set<number>();
+    for (const index of status.uploadedChunks) {
+      if (!Number.isInteger(index) || index < 0 || index >= chunks.length) continue;
+      if (selected.verify) {
+        const hash = selected.hashes.get(index) ?? await sha256(chunks[index].blob);
+        if (shouldStop()) return;
+        selected.hashes.set(index, hash);
+        if (hash !== status.checksums?.[String(index)]) continue;
+      }
+      completed.add(index);
+    }
+    console.info(`[upload] resuming ${id}: ${completed.size}/${chunks.length} pieces already on the server${selected.verify ? ' (checksum verified)' : ''}`);
+    if (status.status === 'COMPLETED' && completed.size !== chunks.length)
+      throw new Error('This upload completed with different content. Choose the file again to start a separate upload.');
 
     // Bytes already fully accepted by the server (by chunk index)
     const completedBytesByIndex = new Map<number, number>();
@@ -376,8 +392,9 @@ export function createUploader(
             throw new DOMException('Upload paused or cancelled', 'AbortError');
           }
 
-          const checksum = await sha256(item.blob);
+          const checksum = selected.hashes.get(item.index) ?? await sha256(item.blob);
           if (shouldStop()) throw new DOMException('Upload paused or cancelled', 'AbortError');
+          selected.hashes.set(item.index, checksum);
 
           // Mark chunk as active at 0 before the request starts
           activeChunkBytes.set(item.index, 0);
@@ -419,6 +436,14 @@ export function createUploader(
 
     if (shouldStop()) return;
 
+    const confirmed = await apiStatus(id);
+    if (shouldStop()) return;
+    const saved = new Set(confirmed.uploadedChunks);
+    if (chunks.some(chunk => !saved.has(chunk.index)))
+      throw new Error('The server still reports missing pieces. Retry to send them.');
+    if (selected.verify && chunks.some(chunk => confirmed.checksums?.[String(chunk.index)] !== selected.hashes.get(chunk.index)))
+      throw new Error('Saved piece checksums changed during the upload. Retry to verify and replace them.');
+
     // Completion is an explicit acknowledgement, not an assumption based on byte progress.
     set({
       status: 'processing',
@@ -433,14 +458,29 @@ export function createUploader(
       uploadedChunks: chunks.map((chunk) => chunk.index) });
   }
 
+  function runAfterPrevious(work: (run: number) => Promise<void>): Promise<void> {
+    const run = ++generation;
+    poolController?.abort();
+    const previous = pendingRun;
+    const task = (async () => {
+      await previous;
+      if (run !== generation) return;
+      try { await work(run); }
+      catch (error: unknown) {
+        if (aborted || paused || run !== generation) return;
+        set({ status: 'error', error: error instanceof Error ? error.message : String(error) });
+      }
+    })();
+    pendingRun = task;
+    return task;
+  }
+
   return {
-    async start(file: File) {
-      const run = ++generation;
-      poolController?.abort();
+    start(file: File) {
       aborted = false;
       paused = false;
-      currentFile = file;
-      fileId = null;
+      const selected: Selection = { file, id: null, token: null, verify: false, hashes: new Map() };
+      selection = selected;
 
       set({
         status: 'init',
@@ -452,49 +492,62 @@ export function createUploader(
         fileId: null,
       });
 
-      try {
+      return runAfterPrevious(async run => {
+        selected.token = await accessToken();
+        if (run !== generation) return;
         const { totalChunks } = sliceFile(file);
-        const { fileId: id } = await apiInit(file, totalChunks);
+        const { fileId: id, resumed } = await apiInit(file, totalChunks, selected.token);
+        // Keep a late init ID for Cancel's deferred discard, even when superseded.
+        selected.id = id;
+        selected.verify = Boolean(resumed);
         if (run !== generation || isUserAbort()) return;
-        fileId = id;
-        set({ fileId: id, status: 'uploading' });
-        await uploadMissing(file, id, run);
-      } catch (err: unknown) {
-        if (aborted || paused || run !== generation) return;
-        const message = err instanceof Error ? err.message : String(err);
-        set({ status: 'error', error: message });
-      }
+        set({ fileId: id, status: resumed ? 'init' : 'uploading' });
+        await uploadMissing(file, id, run, selected);
+      });
     },
 
     pause() {
+      generation++;
       paused = true;
       poolController?.abort();
       set({ status: 'paused', error: null });
     },
 
-    async resume() {
-      if (!currentFile || !fileId) return;
-      const run = ++generation;
-      poolController?.abort();
+    resume() {
+      const selected = selection;
+      if (!selected) return Promise.resolve();
       paused = false;
       aborted = false;
-      set({ status: 'uploading', error: null });
-      try {
-        await uploadMissing(currentFile, fileId, run);
-      } catch (err: unknown) {
-        if (aborted || paused || run !== generation) return;
-        const message = err instanceof Error ? err.message : String(err);
-        set({ status: 'error', error: message });
-      }
+      set({ status: selected.verify ? 'init' : 'uploading', error: null });
+      return runAfterPrevious(async run => {
+        if (!selected.id) throw new Error('The upload was not initialized. Choose the file again.');
+        set({ fileId: selected.id });
+        await uploadMissing(selected.file, selected.id, run, selected);
+      });
     },
 
-    abort() {
+    abort(discard = true) {
       generation++;
       aborted = true;
       paused = false;
       poolController?.abort();
-      currentFile = null;
-      fileId = null;
+      const selected = selection;
+      selection = null;
+      if (discard && selected) {
+        // Let previous requests unwind (including a late init) before deleting.
+        // Keep navigation cleanup non-destructive by calling abort(false).
+        const cleanup = pendingRun.then(async () => {
+          if (!selected.id) return;
+          const token = await accessToken() ?? selected.token;
+          const response = await fetch(`${API}/${selected.id}`, {
+            method: 'DELETE', keepalive: true,
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          });
+          if (!response.ok && ![404, 409].includes(response.status))
+            throw new Error(`Discard failed (${response.status}); operator cleanup may be needed.`);
+        }).catch((error: unknown) => console.warn('[upload] could not discard unfinished upload', error));
+        pendingRun = cleanup;
+      }
       set({
         status: 'idle',
         progress: 0,

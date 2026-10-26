@@ -71,3 +71,22 @@ compact bottom upload dock. Confirmed pieces lift the existing resting balls int
 the hoop; uploads above 40 pieces share a capped inventory of 40 balls.
 
 See [basketball-v3-report.md](basketball-v3-report.md) for current verification and limitations.
+
+## Resume, cancellation and quota
+
+Init reuses the newest unfinished upload with the same filename, size, piece count
+and MIME type, scoped to the signed-in owner. A reselected file verifies the SHA-256
+of saved pieces before skipping them. Pause/resume runs drain in order; navigation
+preserves pieces, while Cancel discards only the owner's unfinished upload. Quota
+counts completed, non-bin files, matching the list.
+
+Apply `supabase/upload-ownership.sql` before deployment if the `files.user_id`
+column is missing; the migration is idempotent. New init/cancel requests use the
+browser's Supabase access token. Bulk cleanup requires a server-only
+`UPLOAD_CLEANUP_TOKEN` of at least 32 random characters. Set it in `.env.local` and
+restart the server; never use a `NEXT_PUBLIC_` variable for it.
+
+See [resume-and-quota-report.md](resume-and-quota-report.md) for the cause analysis,
+acceptance results and commands to remove abandoned uploads safely. The opt-in
+live verification script now also requires `UPLOAD_TEST_ACCESS_TOKEN` for a
+signed-in user; ordinary tests use isolated HTTP and database mocks.

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getSupabaseServer, STORAGE_BUCKET } from '@/lib/supabaseServer';
-import { chunkPrefix, listChunkObjects } from '@/lib/chunkStorage';
+import { getSupabaseServer } from '@/lib/supabaseServer';
+import { removeUploadData } from '@/lib/chunkCleanup';
 
 export async function DELETE(
   request: Request,
@@ -23,23 +23,7 @@ export async function DELETE(
         return NextResponse.json({ error: 'File not found' }, { status: 404 });
       }
 
-      // Also remove leftover pieces from partial uploads and legacy merge attempts.
-      const pieces = await listChunkObjects(supabaseAdmin, fileId);
-      const paths = pieces.map((piece) => piece.path);
-      if (file.storage_path && file.storage_path !== chunkPrefix(fileId)) paths.push(file.storage_path);
-      for (let offset = 0; offset < paths.length; offset += 100) {
-        const { error } = await supabaseAdmin.storage.from(STORAGE_BUCKET).remove(paths.slice(offset, offset + 100));
-        if (error) throw error;
-      }
-
-      const { error: metadataError } = await supabaseAdmin.from('file_chunks').delete().eq('file_id', fileId);
-      if (metadataError) throw metadataError;
-      const { error } = await supabaseAdmin
-        .from('files')
-        .delete()
-        .eq('id', fileId);
-
-      if (error) throw error;
+      await removeUploadData(supabaseAdmin, fileId, file.storage_path);
     } else {
       const { error } = await supabaseAdmin
         .from('files')
