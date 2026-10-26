@@ -51,12 +51,13 @@ Use tabular numerals for progress, counts and performance information.
 
 ## Layout
 The landing content remains capped at the existing six-column-equivalent width.
-The dashboard keeps its existing sidebar and document scrolling. The fixed canvas
-and scrim are portaled to the document so they cover the sidebar without acquiring
-a card's stacking context. Login has no scene or scene imports.
+The dashboard uses a 64 px desktop icon rail that expands to 256 px on hover or
+keyboard focus without moving content. Mobile retains the drawer. The fixed canvas
+is portaled to the document and fills every viewport corner with hardwood. There
+is no global scrim. Login has no scene or scene imports.
 
 ## Elevation & Depth
-Light glass panels, a one-pixel line border and a stable scrim protect text contrast.
+Local glass panels, backdrop blur and a one-pixel line border protect text contrast.
 Scene depth comes from perspective, varied sphere sizes, contact shadows and warm
 maple. No bloom, heavy post-processing, external imagery or audio.
 
@@ -69,6 +70,13 @@ bar is slim, cobalt and segmented; reduced motion and scene failure use ChunkStr
 `CourtProgress` owns the accessible progress readout. `uploadBridge` translates
 server-confirmed indices into events and never supplies progress back to React.
 The landing demo owns a separate emitter explicitly marked demo.
+The upload dock is fixed at bottom center, capped at 640 px, with one status line
+and a 6 px progress track. A session-persistent pill offers compact controls;
+finishing and errors always restore the readable full dock. Recent files uses a
+native modal drawer with five newest files and a link to the full table.
+Idle balls settle after an initial drop. Uploads reserve the actual floor inventory
+(up to 40 balls), grouped by confirmed pieces above 40; reserved balls retain their
+position, radius and rotation as they score. Files and Bin use ten calm balls.
 
 ## Do's and Don'ts
 Keep controls opaque enough to read and focus rings above scenery. Use a bounded,

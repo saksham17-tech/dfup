@@ -2,6 +2,7 @@
 export const FIXED_STEP = 1 / 120;
 export const GRAVITY = 9.81;
 export type Ball = {
+  enabled: boolean;
   x: number;
   y: number;
   z: number;
@@ -33,6 +34,7 @@ export type World = {
   nudges: boolean;
   count: number;
   accumulator: number;
+  bounds?: { minX: number; maxX: number; minZ: number; maxZ: number };
 };
 
 export function seededRandom(seed: number): () => number {
@@ -54,6 +56,7 @@ export function createWorld(count = 28, seed = 123, nudges = true): World {
       z = random() * 25 - 10,
       y = radius + random() * 6;
     balls.push({
+      enabled: true,
       x,
       y,
       z,
@@ -135,6 +138,7 @@ export function stepWorld(world: World, dt = FIXED_STEP): void {
   const balls = world.balls;
   for (let i = 0; i < world.count; i++) {
     const b = balls[i];
+    if (!b.enabled) continue;
     b.px = b.x;
     b.py = b.y;
     b.pz = b.z;
@@ -145,9 +149,9 @@ export function stepWorld(world: World, dt = FIXED_STEP): void {
       if (!world.nudges || (b.wakeIn -= dt) > 0) continue;
       b.sleeping = false;
       b.rest = 0;
-      b.vx = (world.random() - 0.5) * 2.2;
-      b.vz = (world.random() - 0.5) * 2.2;
-      b.vy = 1 + world.random() * 3;
+      b.vx = (world.random() - 0.5) * 0.08;
+      b.vz = (world.random() - 0.5) * 0.08;
+      b.vy = 0;
       b.wakeIn = 2 + world.random() * 4;
     }
     b.vy -= GRAVITY * dt;
@@ -180,8 +184,8 @@ export function stepWorld(world: World, dt = FIXED_STEP): void {
         b.wz = 0;
       }
     }
-    const left = -14 + b.radius,
-      right = 14 - b.radius;
+    const left = (world.bounds?.minX ?? -14) + b.radius,
+      right = (world.bounds?.maxX ?? 14) - b.radius;
     if (b.x < left) {
       b.vx = Math.max(0, -b.vx * 0.6) + (left - b.x) * dt * 20;
       b.x += (left - b.x) * 0.15;
@@ -190,13 +194,15 @@ export function stepWorld(world: World, dt = FIXED_STEP): void {
       b.vx = Math.min(0, -b.vx * 0.6) - (b.x - right) * dt * 20;
       b.x -= (b.x - right) * 0.15;
     }
-    if (b.z < -12 + b.radius) {
+    const back = (world.bounds?.minZ ?? -12) + b.radius;
+    const front = (world.bounds?.maxZ ?? 17) - b.radius;
+    if (b.z < back) {
       b.vz = Math.abs(b.vz) * 0.6;
-      b.z += (-12 + b.radius - b.z) * 0.2;
+      b.z += (back - b.z) * 0.2;
     }
-    if (b.z > 17 - b.radius) {
+    if (b.z > front) {
       b.vz = -Math.abs(b.vz) * 0.6;
-      b.z -= (b.z - 17 + b.radius) * 0.2;
+      b.z -= (b.z - front) * 0.2;
     }
     const damping = Math.exp(-0.28 * dt);
     b.wx *= damping;
@@ -207,7 +213,8 @@ export function stepWorld(world: World, dt = FIXED_STEP): void {
     b.az += b.wz * dt;
   }
   for (let i = 0; i < world.count; i++)
-    for (let j = i + 1; j < world.count; j++) collide(balls[i], balls[j]);
+    for (let j = i + 1; j < world.count; j++)
+      if (balls[i].enabled && balls[j].enabled) collide(balls[i], balls[j]);
   for (let i = 0; i < world.count; i++)
     balls[i].y = Math.max(balls[i].radius, balls[i].y);
 }

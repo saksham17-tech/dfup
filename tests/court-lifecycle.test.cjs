@@ -44,10 +44,11 @@ function harness() {
       this.dpr = value;
     }
     setSize() {}
-    render(scene) {
+    render(scene, camera) {
       if (this.shouldThrow) throw new Error('GPU render failed');
       this.renders++;
       this.scene = scene;
+      this.camera = camera;
     }
     dispose() {
       this.disposals++;
@@ -168,6 +169,59 @@ test('a 30-second visibility gap fast-forwards confirmed pieces without replayin
   h.dispose();
 });
 
+test('104 MB and 208 MB confirmation sequences consume actual floor instances exactly once', () => {
+  for (const total of [26, 52]) {
+    const h = harness();
+    h.bridge.reconcile([], 'uploading', total, `synthetic-${total * 4}MB`);
+    for (let saved = 0; saved <= total; saved++) {
+      const indices = Array.from({ length: saved }, (_, i) => i);
+      h.bridge.reconcile(indices, 'uploading', total, `synthetic-${total * 4}MB`);
+      h.bridge.reconcile(indices, 'uploading', total, `synthetic-${total * 4}MB`);
+      h.frame();
+      const floor = h.renderer.scene.children.find(object => object.isInstancedMesh);
+      const remaining = Math.min(total, 40) - Math.floor(saved * Math.min(total, 40) / total);
+      assert.equal(floor.count, remaining);
+      if (saved === 8) {
+        h.bridge.paused(); h.frame(1000);
+        assert.equal(floor.count, remaining);
+        h.bridge.failed(); h.frame(1000);
+        assert.equal(floor.count, remaining);
+        h.bridge.resumed();
+      }
+    }
+    for (let i = 0; i < 1000; i++) h.frame();
+    const batches = h.renderer.scene.children.filter(object => object.isInstancedMesh);
+    assert.equal(batches[1].count, Math.min(total, 40));
+    h.bridge.reset(); h.frame(); assert.equal(batches[0].count, 24);
+    h.bridge.setView('browse'); h.frame(); assert.equal(batches[0].count, 10);
+    h.dispose();
+  }
+});
+
+test('desktop viewport corners all hit hardwood and the hoop stays above the bottom dock', () => {
+  const h = harness();
+  for (const [width, height] of [[1920, 1080], [1366, 768]]) {
+    h.host.clientWidth = width; h.host.clientHeight = height;
+    h.windowEvents.get('resize')(); h.frame();
+    const camera = h.renderer.camera; camera.updateMatrixWorld();
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), .015);
+    for (const x of [-1, 1]) for (const y of [-1, 1]) {
+      const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2(x, y), camera);
+      const point = ray.ray.intersectPlane(plane, new THREE.Vector3());
+      assert.ok(point && Math.abs(point.x) < 120 && Math.abs(point.z) < 120);
+      assert.ok(point.distanceTo(camera.position) < camera.far);
+    }
+    for (const x of [shotModule.RIM.x - 1.3, shotModule.RIM.x + 1.3]) {
+      for (const y of [3, 5]) {
+        const projected = new THREE.Vector3(x, y, shotModule.RIM.z).project(camera);
+        assert.ok(Math.abs(projected.x) < 1 && Math.abs(projected.y) < 1);
+        assert.ok((1 - projected.y) * height / 2 < height - 110);
+      }
+    }
+  }
+  h.dispose();
+});
+
 test('off-screen rendering stops and unmount removes frames, subscriptions, observers and GPU resources', () => {
   const h = harness();
   h.frame();
@@ -205,7 +259,7 @@ test('context loss and frame errors release the scene and leave upload confirmat
   }
 });
 
-test('quality only steps down and mobile resize uses twelve balls', () => {
+test('quality steps down without removing unconfirmed floor inventory on mobile', () => {
   const h = harness();
   h.frame();
   h.measure(2000);
@@ -213,12 +267,12 @@ test('quality only steps down and mobile resize uses twelve balls', () => {
   let batches = h.renderer.scene.children.filter(
     (object) => object.isInstancedMesh,
   );
-  assert.equal(batches[0].count, 12);
+  assert.equal(batches[0].count, 26);
   assert.equal(h.renderer.dpr, 1);
   for (let i = 0; i < 150; i++) h.frame(16);
   h.measure(1);
   h.frame();
-  assert.equal(batches[0].count, 12);
+  assert.equal(batches[0].count, 26);
   assert.equal(h.renderer.dpr, 1);
   h.host.clientWidth = 390;
   h.host.clientHeight = 844;
@@ -227,6 +281,6 @@ test('quality only steps down and mobile resize uses twelve balls', () => {
   batches = h.renderer.scene.children.filter(
     (object) => object.isInstancedMesh,
   );
-  assert.equal(batches[0].count, 12);
+  assert.equal(batches[0].count, 26);
   h.dispose();
 });

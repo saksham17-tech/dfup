@@ -45,7 +45,7 @@ export function basketballTexture(orange: string) {
   return texture(canvas);
 }
 
-export function hardwoodTexture() {
+export function hardwoodTexture(paintLines = true) {
   const { canvas, ctx } = surface(2048),
     random = seededRandom(157);
   // Narrow maple boards, staggered joints, and long fibre rather than flat stripes.
@@ -74,6 +74,7 @@ export function hardwoodTexture() {
       }
     }
   }
+  if (!paintLines) return texture(canvas);
   // Coordinates map the painted regulation-inspired half court onto the floor.
   ctx.strokeStyle = 'rgba(248,249,246,0.9)';
   ctx.lineWidth = 8;

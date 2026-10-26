@@ -86,7 +86,6 @@ export default function CourtEnvironment({
                   </SceneBoundary>
                 )}
               </div>
-              <div className="court-scrim" aria-hidden="true" />
             </>,
             document.body,
           )}

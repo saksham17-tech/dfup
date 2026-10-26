@@ -14,6 +14,7 @@ export type CourtProgressProps = {
   label: string;
   progress: number;
   variant?: 'full' | 'compact';
+  compact?: boolean;
 };
 
 // ── Real progress remains available even if every scene resource fails ──
@@ -22,6 +23,7 @@ export default function CourtProgress(props: CourtProgressProps) {
   const progress = clamp(props.progress, 0, 100);
   if (!available)
     return (
+      <div className={props.compact ? 'upload-progress-fallback' : undefined}>
       <ChunkStrip
         cells={buildCells(
           props.totalPieces,
@@ -31,10 +33,11 @@ export default function CourtProgress(props: CourtProgressProps) {
         label={props.label}
         valueNow={progress}
       />
+      </div>
     );
   const segments = Math.min(64, Math.max(1, props.totalPieces));
   return (
-    <div className="flex h-9 items-center">
+    <div className={props.compact ? 'upload-progress-slot' : 'flex h-9 items-center'}>
       <div
         role="progressbar"
         aria-label={props.label}

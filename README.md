@@ -53,7 +53,7 @@ the file again. Existing failed records are not automatically deleted.
 ## Basketball backdrop
 
 The landing demo and dashboard use a lazy-loaded Three.js court. Login has no court.
-Reduced motion, renderer errors and unavailable WebGL keep the static gradient and
+Reduced motion, renderer errors and unavailable WebGL keep the static hardwood and
 accessible chunk strip. Confirmed upload pieces drive their own deduplicated event
 bridge; decorative ball physics never changes upload progress.
 
@@ -66,4 +66,8 @@ bridge; decorative ball physics never changes upload progress.
   pause/resume, confirmed-piece counts and a byte-exact download, then removes only
   its own generated upload and chunks. Ordinary `npm test` never touches live data.
 
-See [basketball-v2-report.md](basketball-v2-report.md) for verification and limitations.
+The full-screen court uses local glass surfaces, an expanding icon rail and a
+compact bottom upload dock. Confirmed pieces lift the existing resting balls into
+the hoop; uploads above 40 pieces share a capped inventory of 40 balls.
+
+See [basketball-v3-report.md](basketball-v3-report.md) for current verification and limitations.

@@ -159,7 +159,7 @@ export default function FileDashboard({
 
   return (
     <>
-      <section aria-label={title ?? (isBin ? 'Deleted files' : 'Files')}>
+      <section className="court-glass rounded-lg border border-line bg-surface/85 p-4 sm:p-6" aria-label={title ?? (isBin ? 'Deleted files' : 'Files')}>
         <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
           <div>
             {title && (
@@ -216,7 +216,7 @@ export default function FileDashboard({
         )}
 
         {visible.length > 0 && (
-          <div className="court-glass overflow-hidden rounded-lg border border-line bg-surface/80">
+          <div className="overflow-hidden rounded-lg border border-line">
             <div
               className={`${ROW_GRID} hidden border-b border-line px-4 py-2 text-sm text-muted sm:grid`}
             >

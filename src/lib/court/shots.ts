@@ -10,6 +10,14 @@ export type Shot = {
   flight: number;
   swished: boolean;
   ordinal: number;
+  queued: boolean;
+  scored: boolean;
+  fromX: number; fromY: number; fromZ: number; radius: number;
+  rotationX: number; rotationY: number; rotationZ: number;
+};
+export type FloorInventory = {
+  rebuild: (count: number, drop: boolean) => void;
+  reserve: (shot: Shot) => void;
 };
 export function ballisticCoordinate(
   start: number,
@@ -25,56 +33,86 @@ export function pilePosition(
   index: number,
   out: { x: number; y: number; z: number },
 ) {
-  out.x = RIM.x - 1.25 + (index % 8) * 0.36;
-  out.y = 0.25 + Math.floor(index / 16) * 0.39;
-  out.z = RIM.z - 0.45 + (Math.floor(index / 8) % 2) * 0.4;
+  out.x = RIM.x - 1.2 + (index % 5) * 0.6;
+  out.y = 0.3 + Math.floor(index / 10) * 0.48;
+  out.z = RIM.z - 0.3 + (Math.floor(index / 5) % 2) * 0.58;
 }
-export function createShots(bridge: UploadBridge) {
+export function createShots(bridge: UploadBridge, inventory?: FloorInventory) {
   const snapshot = bridge.snapshot();
   const seen = new Set(snapshot.saved);
   const queue: number[] = [];
-  const slots: Shot[] = Array.from({ length: 20 }, () => ({
+  const slots: Shot[] = Array.from({ length: 40 }, () => ({
     active: false,
     index: 0,
     age: 0,
     flight: 1,
     swished: false,
     ordinal: 0,
+    queued: false, scored: false, fromX: LAUNCH.x, fromY: LAUNCH.y, fromZ: LAUNCH.z,
+    radius: 0.27, rotationX: 0, rotationY: 0, rotationZ: 0,
   }));
+  let count = snapshot.view === 'browse' ? 10 : snapshot.phase === 'idle' ? 24 : Math.min(40, snapshot.total);
+  let issued = 0, fired = 0;
   let phase: CourtPhase = snapshot.phase,
-    settled = seen.size,
+    settled = Math.floor(seen.size * count / snapshot.total),
     clock = 0,
     next = 0;
   let celebration = -1,
     celebrated = phase === 'completed',
     netImpulse = 0;
+  inventory?.rebuild(count, phase === 'idle' && snapshot.view === 'upload');
+
+  function reserveOwed() {
+    if (bridge.snapshot().view === 'browse') return;
+    const owed = Math.floor(seen.size * count / bridge.snapshot().total);
+    while (issued < owed) {
+      const slot = slots[issued];
+      slot.index = issued; slot.ordinal = issued; slot.active = false;
+      slot.queued = true; slot.age = 0; slot.swished = false;
+      inventory?.reserve(slot);
+      queue.push(issued++);
+    }
+    if (queue.length > 20) {
+      const extra = queue.length - 20;
+      for (let i = 0; i < extra; i++) { slots[queue[i]].queued = false; slots[queue[i]].scored = true; }
+      settled += extra; fired += extra; queue.splice(0, extra);
+    }
+  }
+  // Hydration / late lazy loading reconciles confirmed balls directly into the return.
+  reserveOwed();
+  for (let i = 0; i < slots.length; i++) { slots[i].queued = false; slots[i].scored = i < issued; }
+  queue.length = 0; fired = issued; settled = issued;
 
   // ── Event bookkeeping: duplicates never become shots ──
   function accept(event: UploadEvent) {
-    if (event.type === 'reset') {
+    if (event.type === 'reset' || event.type === 'configure' || event.type === 'view') {
       seen.clear();
       queue.length = 0;
       settled = 0;
-      phase = 'idle';
+      phase = event.type === 'configure' ? 'uploading' : 'idle';
+      count = bridge.snapshot().view === 'browse' ? 10 : event.type === 'configure' ? Math.min(40, event.total) : 24;
+      issued = 0; fired = 0;
+      inventory?.rebuild(count, phase === 'idle' && bridge.snapshot().view === 'upload');
       celebration = -1;
       celebrated = false;
       netImpulse = 0;
       next = clock;
-      for (const slot of slots) slot.active = false;
-    } else if (event.type === 'phase') phase = event.phase;
+      for (const slot of slots) { slot.active = false; slot.queued = false; slot.scored = false; }
+    } else if (event.type === 'phase') {
+      if (phase === 'idle' && event.phase !== 'idle' && bridge.snapshot().view === 'upload') prepareUpload();
+      phase = event.phase;
+    }
     else if (!seen.has(event.index)) {
+      if (phase === 'idle') prepareUpload();
       seen.add(event.index);
-      queue.push(event.index);
-      if (queue.length > 20) {
-        settled += queue.length - 20;
-        queue.splice(0, queue.length - 20);
-      }
+      reserveOwed();
     }
   }
   function fastForward() {
-    settled = seen.size;
+    reserveOwed();
+    settled = issued; fired = issued;
     queue.length = 0;
-    for (const slot of slots) slot.active = false;
+    for (let i = 0; i < slots.length; i++) { slots[i].active = false; slots[i].queued = false; slots[i].scored = i < issued; }
     if (phase === 'completed') celebrated = true;
     celebration = -1;
     next = clock;
@@ -85,18 +123,13 @@ export function createShots(bridge: UploadBridge) {
     netImpulse *= Math.exp(-dt * 5);
     if (celebration >= 0) celebration += dt;
     if (phase !== 'paused' && queue.length && clock >= next) {
-      for (let i = 0; i < slots.length; i++) {
-        const slot = slots[i];
-        if (slot.active) continue;
+        const slot = slots[queue.shift()!];
         slot.active = true;
-        slot.index = queue.shift()!;
+        slot.queued = false; fired++;
         slot.age = 0;
         slot.swished = false;
-        slot.flight = 0.9 + ((slot.index * 17) % 41) / 100;
-        slot.ordinal = seen.size - queue.length - 1;
+        slot.flight = Math.max(0.9, Math.min(1.6, 0.9 + Math.hypot(RIM.x - slot.fromX, RIM.z - slot.fromZ) / 40));
         next = clock + 0.15;
-        break;
-      }
     }
     let active = false;
     for (let i = 0; i < slots.length; i++) {
@@ -110,6 +143,7 @@ export function createShots(bridge: UploadBridge) {
       }
       if (slot.age >= slot.flight + rimDelay + 0.55) {
         slot.active = false;
+        slot.scored = true;
         settled++;
       } else active = true;
     }
@@ -117,6 +151,13 @@ export function createShots(bridge: UploadBridge) {
       celebrated = true;
       celebration = 0;
     }
+  }
+  function prepareUpload() {
+    const nextCount = Math.min(40, bridge.snapshot().total);
+    if (count !== nextCount || phase === 'idle') {
+      count = nextCount; inventory?.rebuild(count, false);
+    }
+    phase = 'uploading';
   }
   return {
     accept,
@@ -142,6 +183,9 @@ export function createShots(bridge: UploadBridge) {
       get netImpulse() {
         return netImpulse;
       },
+      get ballCount() { return count; },
+      get remaining() { return count - issued; },
+      get shotsFired() { return fired; },
     },
   };
 }
@@ -152,9 +196,9 @@ export function shotPosition(
   out: { x: number; y: number; z: number },
 ) {
   if (shot.age <= shot.flight) {
-    out.x = ballisticCoordinate(LAUNCH.x, RIM.x, shot.age, shot.flight);
-    out.y = ballisticCoordinate(LAUNCH.y, RIM.y, shot.age, shot.flight, -9.81);
-    out.z = ballisticCoordinate(LAUNCH.z, RIM.z, shot.age, shot.flight);
+    out.x = ballisticCoordinate(shot.fromX, RIM.x, shot.age, shot.flight);
+    out.y = ballisticCoordinate(shot.fromY, RIM.y, shot.age, shot.flight, -9.81);
+    out.z = ballisticCoordinate(shot.fromZ, RIM.z, shot.age, shot.flight);
   } else {
     const delay = shot.index % 8 === 3 ? 0.16 : 0;
     if (shot.age < shot.flight + delay) {

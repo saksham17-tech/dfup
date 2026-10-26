@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { advanceWorld, createWorld } from './physics';
 import { basketballTexture, contactTexture, hardwoodTexture } from './textures';
-import { createShots, pilePosition, RIM, shotPosition } from './shots';
+import { createShots, pilePosition, RIM, shotPosition, type Shot } from './shots';
 import type { UploadBridge } from './uploadBridge';
 
 type Tier = 'high' | 'medium' | 'low';
@@ -79,18 +79,19 @@ export function mountCourt(
       token = (name: string) => css.getPropertyValue(`--color-${name}`).trim();
     const orange = token('ball'),
       rimColor = token('rim'),
-      alert = token('alert'),
-      paper = token('paper');
+      alert = token('alert');
     const normalRim = new THREE.Color(rimColor),
       errorRim = new THREE.Color(alert),
       unlit = new THREE.Color(0x000000);
-    scene.fog = new THREE.Fog(paper, 25, 65);
+    // Every camera ray intersects hardwood; no paper horizon or global scrim.
+    scene.fog = null;
     const camera = new THREE.PerspectiveCamera(49, 1, 0.1, 110);
     let mobile = window.innerWidth < 640;
     let lastDpr = window.devicePixelRatio;
     let tier: Tier = mobile ? 'medium' : 'high';
-    const world = createWorld(28, options.seed),
-      shots = createShots(bridge);
+    const world = createWorld(40, options.seed, false);
+    world.bounds = { minX: -60, maxX: 60, minZ: -95, maxZ: 35 };
+    let shots: ReturnType<typeof createShots>;
     const point = { x: 0, y: 0, z: 0 },
       dummy = new THREE.Object3D();
     let time = 0,
@@ -130,7 +131,7 @@ export function mountCourt(
       roughness: 0.83,
     });
     let sphere = new THREE.SphereGeometry(1, 48, 32);
-    const loose = new THREE.InstancedMesh(sphere, ballMaterial, 28);
+    const loose = new THREE.InstancedMesh(sphere, ballMaterial, 40);
     const uploaded = new THREE.InstancedMesh(sphere, ballMaterial, 85);
     loose.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     uploaded.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -151,6 +152,13 @@ export function mountCourt(
     floor.position.z = 1;
     floor.receiveShadow = true;
     scene.add(floor);
+    const surroundMap = hardwoodTexture(false); textures.push(surroundMap);
+    surroundMap.wrapS = surroundMap.wrapT = THREE.RepeatWrapping;
+    surroundMap.repeat.set(8, 8);
+    const surround = new THREE.Mesh(new THREE.PlaneGeometry(240, 240),
+      new THREE.MeshStandardMaterial({ map: surroundMap, roughness: 0.8 }));
+    surround.rotation.x = -Math.PI / 2; surround.position.y = -0.015;
+    surround.receiveShadow = true; scene.add(surround);
 
     // ── Contact shadows: a single batch with per-instance height fading ──
     const shadowGeometry = new THREE.PlaneGeometry(1, 1);
@@ -284,6 +292,10 @@ export function mountCourt(
     const net = new THREE.LineSegments(netGeometry, netMaterial);
     net.position.copy(rim.position);
     scene.add(net);
+    const basketBox = new THREE.BoxGeometry(3.5, 1.7, 1.8);
+    const basket = new THREE.LineSegments(new THREE.EdgesGeometry(basketBox),
+      new THREE.LineBasicMaterial({ color: 0x5b655f, transparent: true, opacity: 0.6 }));
+    basketBox.dispose(); basket.position.set(RIM.x, 0.85, RIM.z); scene.add(basket);
 
     // ── One short completion burst, with preallocated particle parameters ──
     const confetti = new THREE.InstancedMesh(
@@ -321,14 +333,7 @@ export function mountCourt(
     }
     function quality(next: Tier) {
       tier = next;
-      world.count = mobile
-        ? 12
-        : tier === 'high'
-          ? 28
-          : tier === 'medium'
-            ? 22
-            : 12;
-      loose.count = world.count;
+      // Quality changes geometry and DPR, never the upload's ball inventory.
       webgl.setPixelRatio(
         Math.min(
           window.devicePixelRatio || 1,
@@ -358,20 +363,13 @@ export function mountCourt(
         height = host.clientHeight;
       mobile = width < 640;
       if (mobile && tier === 'high') quality('medium');
-      world.count = mobile
-        ? 12
-        : tier === 'high'
-          ? 28
-          : tier === 'medium'
-            ? 22
-            : 12;
-      loose.count = world.count;
       camera.aspect = width / Math.max(1, height);
       const narrow = width < 640;
-      camera.position.set(narrow ? 0 : 0.5, narrow ? 15 : 12, narrow ? 29 : 23);
-      camera.fov = narrow ? 62 : 49;
-      camera.lookAt(narrow ? 2 : 0, 0.7, -3);
+      camera.position.set(0, narrow ? 22 : 17, narrow ? 26 : 22);
+      camera.fov = narrow ? 62 : 46;
+      camera.lookAt(narrow ? 2 : -2, -1, narrow ? -1 : 0);
       camera.updateProjectionMatrix();
+      camera.updateMatrixWorld();
       webgl.setPixelRatio(
         Math.min(
           window.devicePixelRatio || 1,
@@ -382,6 +380,70 @@ export function mountCourt(
     }
     quality(tier);
     resize();
+
+    // ── Reuse the floor inventory for scoring; avoid measured UI rectangles ──
+    const projected = new THREE.Vector3(), ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const ray = new THREE.Raycaster(), screen = new THREE.Vector2(), candidate = new THREE.Vector3();
+    let avoid: DOMRect[] = [];
+    const measureAvoid = () => {
+      if (typeof document.querySelectorAll === 'function') {
+        avoid = Array.from(document.querySelectorAll<HTMLElement>('[data-court-avoid]'), element => element.getBoundingClientRect())
+          .filter(rect => rect.right > 0 && rect.left < host.clientWidth && rect.bottom > 0 && rect.top < host.clientHeight);
+      }
+    };
+    function obscured(x: number, y: number, z: number) {
+      projected.set(x, y, z).project(camera);
+      const sx = (projected.x + 1) * host.clientWidth / 2, sy = (1 - projected.y) * host.clientHeight / 2;
+      for (const rect of avoid) if (sx > rect.left - 22 && sx < rect.right + 22 && sy > rect.top - 22 && sy < rect.bottom + 22) return true;
+      return Math.abs(projected.x) > 0.95 || Math.abs(projected.y) > 0.95;
+    }
+    function rebuildFloor(count: number, drop: boolean) {
+      measureAvoid(); world.count = count; world.accumulator = 0;
+      for (let i = 0; i < world.balls.length; i++) {
+        const b = world.balls[i]; b.enabled = i < count;
+        if (!b.enabled) continue;
+        b.radius = (drop ? 0.32 : 0.24) + world.random() * (drop ? 0.25 : 0.12);
+        b.mass = b.radius ** 3 * 8;
+        for (let attempt = 0; attempt < 160; attempt++) {
+          screen.set((0.07 + world.random() * 0.86) * 2 - 1, 1 - (0.34 + world.random() * 0.5) * 2);
+          ray.setFromCamera(screen, camera); ray.ray.intersectPlane(ground, candidate);
+          let overlap = false;
+          for (let j = 0; j < i; j++) {
+            const other = world.balls[j];
+            if (Math.hypot(other.x - candidate.x, other.z - candidate.z) < other.radius + b.radius + 0.12) overlap = true;
+          }
+          if (!overlap && !obscured(candidate.x, b.radius, candidate.z)) break;
+        }
+        b.x = b.px = candidate.x; b.z = b.pz = candidate.z;
+        b.y = b.py = b.radius + (drop ? 0.8 + world.random() * 2.5 : 0);
+        b.vx = b.vy = b.vz = b.wx = b.wy = b.wz = 0;
+        b.ax = b.pax = world.random() * 6; b.ay = b.pay = world.random() * 6; b.az = b.paz = world.random() * 6;
+        b.sleeping = !drop; b.rest = 0;
+      }
+    }
+    function reserveFloorBall(shot: Shot) {
+      measureAvoid();
+      let selected = -1;
+      for (let i = 0; i < world.count; i++) {
+        const b = world.balls[i]; if (!b.enabled) continue;
+        if (selected === -1) selected = i;
+        if (!obscured(b.x, b.y, b.z)) { selected = i; break; }
+      }
+      if (selected < 0) throw new Error('Upload ball inventory exhausted');
+      const b = world.balls[selected]; b.enabled = false;
+      shot.fromX = b.x; shot.fromY = b.y; shot.fromZ = b.z; shot.radius = b.radius;
+      shot.rotationX = b.ax; shot.rotationY = b.ay; shot.rotationZ = b.az;
+    }
+    shots = createShots(bridge, { rebuild: rebuildFloor, reserve: reserveFloorBall });
+    window.addEventListener('resize', measureAvoid); cleanups.push(() => window.removeEventListener('resize', measureAvoid));
+    let avoidTimer: ReturnType<typeof setTimeout> | undefined;
+    if (typeof MutationObserver !== 'undefined' && document.body) {
+      const changes = new MutationObserver(() => {
+        if (!avoidTimer) avoidTimer = setTimeout(() => { avoidTimer = undefined; measureAvoid(); }, 100);
+      });
+      changes.observe(document.body, { childList: true, subtree: true });
+      cleanups.push(() => { changes.disconnect(); if (avoidTimer) clearTimeout(avoidTimer); });
+    }
     monitor = setInterval(() => {
       if (hidden || !intersecting || disposed) {
         measurementStart = performance.now();
@@ -430,8 +492,10 @@ export function mountCourt(
         const alpha = stopped ? 1 : advanceWorld(world, dt);
         if (!stopped) shots.update(dt);
         shadowCount = 0;
+        let floorCount = 0;
         for (let i = 0; i < world.count; i++) {
           const b = world.balls[i];
+          if (!b.enabled) continue;
           const x = b.px + (b.x - b.px) * alpha,
             y = b.py + (b.y - b.py) * alpha,
             z = b.pz + (b.z - b.pz) * alpha;
@@ -443,13 +507,12 @@ export function mountCourt(
           );
           dummy.scale.setScalar(b.radius);
           dummy.updateMatrix();
-          loose.setMatrixAt(i, dummy.matrix);
+          loose.setMatrixAt(floorCount++, dummy.matrix);
           shadow(x, y, z, b.radius);
         }
+        loose.count = floorCount;
         loose.instanceMatrix.needsUpdate = true;
         let uploadCount = 0;
-        const total = bridge.snapshot().total;
-        const groupSize = Math.max(1, Math.ceil(total / 64));
         let hasActiveShot = false;
         for (let i = 0; i < shots.slots.length; i++)
           if (shots.slots[i].active) hasActiveShot = true;
@@ -458,42 +521,40 @@ export function mountCourt(
           shots.state.saved > 0 &&
           shots.state.queued === 0 &&
           !hasActiveShot;
-        const pileCount = Math.min(
-          hanging ? 63 : 64,
-          Math.ceil(
-            Math.max(0, shots.state.settled - (hanging ? 1 : 0)) / groupSize,
-          ),
-        );
+        let held = -1;
+        if (hanging) for (let i = 0; i < shots.slots.length; i++) if (shots.slots[i].scored) held = i;
         const celebration = shots.state.celebration;
         const hop =
           celebration >= 0 && celebration < 0.45
             ? Math.sin((celebration / 0.45) * Math.PI) * 0.25
             : 0;
-        for (let i = 0; i < pileCount; i++) {
+        for (let i = 0; i < shots.slots.length; i++) {
+          const slot = shots.slots[i]; if (!slot.scored || i === held) continue;
           pilePosition(i, point);
           point.y += hop;
           dummy.position.set(point.x, point.y, point.z);
           dummy.rotation.set(i * 0.5, i * 1.2, 0);
-          dummy.scale.setScalar(0.25);
+          dummy.scale.setScalar(slot.radius);
           dummy.updateMatrix();
           uploaded.setMatrixAt(uploadCount++, dummy.matrix);
-          shadow(point.x, point.y, point.z, 0.25);
+          shadow(point.x, point.y, point.z, slot.radius);
         }
         for (let i = 0; i < shots.slots.length; i++) {
           const slot = shots.slots[i];
-          if (!slot.active) continue;
-          shotPosition(slot, point);
+          if (!slot.active && !slot.queued) continue;
+          if (slot.active) shotPosition(slot, point);
+          else { point.x = slot.fromX; point.y = slot.fromY + 0.08; point.z = slot.fromZ; }
           dummy.position.set(point.x, point.y, point.z);
-          dummy.rotation.set(slot.age * 6, slot.age * 3, 0);
-          dummy.scale.setScalar(0.27);
+          dummy.rotation.set(slot.rotationX + slot.age * 6, slot.rotationY + slot.age * 3, slot.rotationZ);
+          dummy.scale.setScalar(slot.radius);
           dummy.updateMatrix();
           uploaded.setMatrixAt(uploadCount++, dummy.matrix);
-          shadow(point.x, point.y, point.z, 0.27);
+          shadow(point.x, point.y, point.z, slot.radius);
         }
-        if (hanging) {
+        if (hanging && held >= 0) {
           dummy.position.set(RIM.x, RIM.y + 0.6, RIM.z);
           dummy.rotation.set(0, 0, 0);
-          dummy.scale.setScalar(0.27);
+          dummy.scale.setScalar(shots.slots[held].radius);
           dummy.updateMatrix();
           uploaded.setMatrixAt(uploadCount++, dummy.matrix);
           shadow(RIM.x, RIM.y + 0.6, RIM.z, 0.27);

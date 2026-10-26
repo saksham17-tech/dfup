@@ -4,6 +4,8 @@ export type CourtPhase =
 export type UploadEvent =
   | { type: 'saved'; index: number }
   | { type: 'phase'; phase: CourtPhase }
+  | { type: 'configure'; total: number }
+  | { type: 'view'; view: 'upload' | 'browse' }
   | { type: 'reset' };
 export type UploadBridge = ReturnType<typeof createUploadBridge>;
 
@@ -13,6 +15,7 @@ export function createUploadBridge(demo = false) {
   let phase: CourtPhase = 'idle',
     total = 1,
     session: string | null = null;
+  let view: 'upload' | 'browse' = 'upload';
   const emit = (event: UploadEvent) => {
     for (const listener of listeners) {
       // An optional visual subscriber must never interrupt the real upload effect.
@@ -26,6 +29,7 @@ export function createUploadBridge(demo = false) {
   const snapshot: {
     readonly phase: CourtPhase;
     readonly total: number;
+    readonly view: 'upload' | 'browse';
     readonly saved: ReadonlySet<number>;
   } = {
     get phase() {
@@ -34,6 +38,7 @@ export function createUploadBridge(demo = false) {
     get total() {
       return total;
     },
+    get view() { return view; },
     saved,
   };
   const setPhase = (next: CourtPhase) => {
@@ -74,7 +79,11 @@ export function createUploadBridge(demo = false) {
       emit({ type: 'reset' });
     },
     configure(pieces: number) {
-      total = Math.max(1, pieces);
+      const next = Math.max(1, pieces);
+      if (next !== total) { total = next; emit({ type: 'configure', total }); }
+    },
+    setView(next: 'upload' | 'browse') {
+      if (view !== next) { view = next; emit({ type: 'view', view }); }
     },
     reconcile(
       indices: readonly number[],
@@ -91,7 +100,7 @@ export function createUploadBridge(demo = false) {
       // init starts a new selection before the server assigns its ID.
       if (fileId === null && next === 'uploading' && session !== null)
         bridge.reset();
-      total = Math.max(1, pieces);
+      bridge.configure(pieces);
       if (fileId !== null) session = fileId;
       for (const index of indices) bridge.chunkSaved(index);
       setPhase(next);

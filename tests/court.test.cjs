@@ -134,7 +134,7 @@ test('a failed animation subscriber cannot interrupt upload progress or other li
 });
 
 // ── Shot queue, pause semantics, hidden-tab reconciliation and completion ──
-function system(total = 100) {
+function system(total = 26) {
   const bridge = createUploadBridge();
   bridge.configure(total);
   bridge.resumed();
@@ -184,11 +184,100 @@ test('backlogs fast-forward every extra piece and hidden-tab return never replay
   const s = system(1000);
   for (let i = 0; i < 1000; i++) s.bridge.chunkSaved(i);
   assert.equal(s.shots.state.queued, 20);
-  assert.equal(s.shots.state.settled, 980);
+  assert.equal(s.shots.state.settled, 20);
   s.shots.fastForward();
   s.advance(30);
-  assert.equal(s.shots.state.settled, 1000);
+  assert.equal(s.shots.state.settled, 40);
   assert.equal(s.shots.state.queued, 0);
+});
+
+test('grouped confirmations remove exactly floor(saved * balls / total) floor balls', () => {
+  const s = system(52);
+  assert.equal(s.shots.state.ballCount, 40);
+  for (let i = 0; i < 52; i++) {
+    s.bridge.chunkSaved(i);
+    assert.equal(s.shots.state.remaining, 40 - Math.floor((i + 1) * 40 / 52));
+    s.bridge.chunkSaved(i);
+    assert.equal(s.shots.state.remaining, 40 - Math.floor((i + 1) * 40 / 52));
+  }
+  s.advance(8);
+  assert.equal(s.shots.state.settled, 40);
+  assert.equal(s.shots.state.saved, 52);
+});
+
+test('scoring reuses the selected floor ball origin and radius', () => {
+  const bridge = createUploadBridge(); bridge.configure(26); bridge.resumed();
+  const rebuilds = [], reserved = [];
+  const shots = createShots(bridge, { rebuild: (...args) => rebuilds.push(args), reserve(shot) {
+    shot.fromX = 3; shot.fromY = .32; shot.fromZ = 5; shot.radius = .32;
+    reserved.push(shot.ordinal);
+  } });
+  bridge.subscribe(shots.accept);
+  bridge.chunkSaved(0); shots.update(.01);
+  assert.equal(reserved.length, 1);
+  assert.equal(shots.slots[0].fromX, 3); assert.equal(shots.slots[0].radius, .32);
+  assert.equal(shots.state.remaining, 25);
+  bridge.reset(); assert.equal(shots.state.ballCount, 24);
+  bridge.setView('browse'); assert.equal(shots.state.ballCount, 10);
+  bridge.setView('upload'); assert.equal(shots.state.ballCount, 24);
+});
+
+test('late loading reconciles a large confirmed backlog without double-counting the pile', () => {
+  const bridge = createUploadBridge();
+  bridge.reconcile(Array.from({ length: 52 }, (_, i) => i), 'completed', 52, 'late');
+  const shots = createShots(bridge);
+  assert.equal(shots.state.settled, 40);
+  assert.equal(shots.state.remaining, 0);
+  assert.equal(shots.slots.filter(slot => slot.scored).length, 40);
+  shots.update(30);
+  assert.equal(shots.state.settled, 40);
+});
+
+test('idle physics settles and disabled floor balls never move', () => {
+  const world = physics.createWorld(24, 123, false);
+  for (let i = 0; i < 10000; i++) physics.stepWorld(world);
+  assert.ok(world.balls.every(ball => ball.sleeping));
+  const ball = world.balls[0]; ball.enabled = false;
+  const before = { ...ball };
+  for (let i = 0; i < 120; i++) physics.stepWorld(world);
+  assert.deepEqual(ball, before);
+});
+
+test('the real compact uploader renders one saved status and replaces it for finishing or error', () => {
+  const React = require('react');
+  const { renderToStaticMarkup } = require('react-dom/server');
+  const progress = loadTs('src/components/CourtProgress.tsx', {
+    './CourtEnvironment': { useCourtAvailable: () => true },
+    './ChunkStrip': loadTs('src/components/ChunkStrip.tsx'),
+    '@/lib/courtMath': loadTs('src/lib/courtMath.ts'),
+  });
+  for (const status of ['uploading', 'paused', 'processing', 'error', 'completed']) {
+    let hook = 0;
+    const uploader = loadTs('src/components/FileUploader.tsx', {
+      react: { ...React, useState(initial) {
+        const index = hook++;
+        return React.useState(index === 0 ? {
+          fileId: 'synthetic', status, progress: 15, totalBytes: 208 * 1024 * 1024,
+          uploadedBytes: 32 * 1024 * 1024, uploadedChunks: [0,1,2,3,4,5,6,7],
+          error: 'A piece failed. Retry to continue.',
+        } : index === 1 ? 'large-upload.bin' : initial);
+      } },
+      '@/lib/upload': { CHUNK_SIZE: 4 * 1024 * 1024, MAX_CONCURRENT_UPLOADS: 4 },
+      '@/lib/court/uploadBridge': { uploadBridge: createUploadBridge() },
+      '@/lib/ui': loadTs('src/lib/ui.ts'),
+      'lucide-react': Object.fromEntries(['Pause', 'Play', 'X', 'RotateCcw', 'Minus', 'Maximize2'].map(name => [name, () => null])),
+      './CourtProgress': progress,
+    });
+    const html = renderToStaticMarkup(React.createElement(uploader.default));
+    assert.ok(html.includes('title="large-upload.bin"'));
+    assert.ok(html.includes('upload-dock'));
+    assert.ok(html.includes('upload-progress-slot'));
+    assert.equal((html.match(/8 of 52 saved/g) || []).length,
+      status === 'processing' || status === 'error' ? 0 : 1);
+    if (status === 'processing') assert.ok(html.includes('Last piece sent. Confirming with the server…'));
+    if (status === 'error') assert.ok(html.includes('A piece failed. Retry to continue.'));
+    assert.ok(html.includes('aria-label="Minimize upload bar"'));
+  }
 });
 
 test('completion celebrates once; failure freezes shots and reset clears the pile', () => {

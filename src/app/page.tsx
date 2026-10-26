@@ -7,11 +7,11 @@ export default function LandingPage() {
   return (
     <div className="court-landing min-h-screen">
       <header className="relative z-10 mx-auto flex max-w-6xl items-center px-5 py-5 sm:px-8">
-        <Wordmark />
+        <div className="court-glass rounded-lg border border-line bg-surface/80 px-4 py-3"><Wordmark /></div>
       </header>
 
       <main className="relative z-10 mx-auto max-w-6xl px-5 pb-24 sm:px-8">
-        <section className="pt-10 sm:pt-20">
+        <section className="court-glass mt-10 max-w-3xl rounded-lg border border-line bg-surface/80 p-5 sm:mt-16 sm:p-8">
           <h1 className="max-w-3xl font-display text-5xl font-semibold leading-[1.02] tracking-tight sm:text-7xl">
             Pause an upload. Pick it back up where it stopped.
           </h1>
