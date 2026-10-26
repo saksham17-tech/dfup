@@ -149,6 +149,19 @@ function system(total = 26) {
   };
 }
 
+test('confirmation sequence 0, 1, 2 launches three resting balls; duplicates launch none', () => {
+  const s = system(26);
+  for (const index of [0, 1, 2]) {
+    s.bridge.reconcile(Array.from({ length: index + 1 }, (_, i) => i), 'uploading', 26, 'confirmed');
+    s.advance(.2);
+  }
+  assert.equal(s.shots.state.shotsFired, 3);
+  assert.equal(s.shots.state.remaining, 23);
+  s.bridge.reconcile([0, 1, 2, 2], 'uploading', 26, 'confirmed'); s.advance(3);
+  assert.equal(s.shots.state.shotsFired, 3);
+  assert.equal(s.shots.state.settled, 3);
+});
+
 test('each ballistic flight passes through the centre of the rim', () => {
   for (const flight of [0.9, 1.1, 1.3]) {
     assert.ok(
@@ -251,7 +264,8 @@ test('the real compact uploader renders one saved status and replaces it for fin
     './ChunkStrip': loadTs('src/components/ChunkStrip.tsx'),
     '@/lib/courtMath': loadTs('src/lib/courtMath.ts'),
   });
-  for (const status of ['uploading', 'paused', 'processing', 'error', 'completed']) {
+  for (const scenario of ['uploading', 'waiting', 'paused', 'processing', 'error', 'completed']) {
+    const status = scenario === 'waiting' ? 'uploading' : scenario;
     let hook = 0;
     const uploader = loadTs('src/components/FileUploader.tsx', {
       react: { ...React, useState(initial) {
@@ -266,6 +280,7 @@ test('the real compact uploader renders one saved status and replaces it for fin
       '@/lib/court/uploadBridge': { uploadBridge: createUploadBridge() },
       '@/lib/ui': loadTs('src/lib/ui.ts'),
       '@/lib/supabaseBrowser': {},
+      '@/lib/uploadActivity': { EMPTY_ACTIVITY: { indices: [8,9,10,11,12], uploading: 5, waiting: scenario === 'waiting' } },
       'lucide-react': Object.fromEntries(['Pause', 'Play', 'X', 'RotateCcw', 'Minus', 'Maximize2'].map(name => [name, () => null])),
       './CourtProgress': progress,
     });
@@ -274,7 +289,10 @@ test('the real compact uploader renders one saved status and replaces it for fin
     assert.ok(html.includes('upload-dock'));
     assert.ok(html.includes('upload-progress-slot'));
     assert.equal((html.match(/8 of 52 saved/g) || []).length,
-      status === 'processing' || status === 'error' ? 0 : 1);
+      status === 'processing' || status === 'error' || scenario === 'waiting' ? 0 : 1);
+    assert.ok(html.includes('aria-label="Bytes sent"'));
+    if (scenario === 'uploading') assert.ok(html.includes('5 uploading · 8 of 52 saved · 32.0 MB sent'));
+    if (scenario === 'waiting') { assert.ok(html.includes('Waiting for the server…')); assert.ok(html.includes('upload-status text-ink')); }
     if (status === 'processing') assert.ok(html.includes('Last piece sent. Confirming with the server…'));
     if (status === 'error') assert.ok(html.includes('A piece failed. Retry to continue.'));
     assert.ok(html.includes('aria-label="Minimize upload bar"'));
@@ -390,4 +408,46 @@ test('the static fallback renders accessible saved progress without constructing
   assert.ok(html.includes('aria-label="Upload progress"'));
   assert.ok(html.includes('aria-valuenow="12"'));
   assert.equal((html.match(/class="chunk-fill"/g) || []).length, 26);
+});
+
+test('out-of-order confirmations shoot their own hovering floor ball and conserve the inventory', () => {
+  const bridge=createUploadBridge(); bridge.reconcile([],'uploading',26,'hover');
+  let reserves=0, restores=0;
+  const shots=createShots(bridge,{rebuild(){},reserve(slot){slot.floorIndex=reserves++;slot.originX=slot.fromX=slot.index+2;slot.originY=slot.fromY=.3;slot.originZ=slot.fromZ=2;},restore(){restores++;}});
+  bridge.subscribe(shots.accept); bridge.setInFlight([0,1,2]); shots.update(.6);
+  const ownBall=shots.slots.find(slot=>slot.index===2);
+  const point={x:0,y:0,z:0};
+  loadTs('src/lib/court/shots.ts').hoverPosition(ownBall,point);
+  assert.equal(shots.state.hovering,3); assert.equal(shots.state.remaining,23);
+  bridge.chunkSaved(2); shots.update(.01);
+  assert.equal(shots.slots.find(slot=>slot.active),ownBall);
+  assert.equal(ownBall.fromX,point.x); assert.equal(shots.state.hovering,2);
+  assert.equal(shots.state.remaining+shots.state.hovering+shots.state.confirmed,26);
+  bridge.chunkSaved(2); assert.equal(shots.state.confirmed,1);
+  bridge.paused(); assert.equal(shots.state.hovering,0); assert.equal(restores,2);
+  assert.equal(shots.state.remaining,25);
+  bridge.resumed(); bridge.setInFlight([0,1]); assert.equal(shots.state.hovering,2);
+  bridge.chunkSaved(0); bridge.chunkSaved(1);
+  assert.equal(shots.state.confirmed,3);
+  for(let i=0;i<600;i++)shots.update(1/120);
+  assert.equal(shots.state.settled,3);
+  bridge.reset(); assert.equal(shots.state.remaining,24); assert.equal(shots.state.hovering,0);
+});
+
+test('grouped in-flight counts remain conserved through out-of-order confirmations and hidden-tab reconciliation', () => {
+  const s=system(52);
+  let saved=[];
+  for(let batch=0;batch<11;batch++) {
+    const pending=Array.from({length:Math.min(5,52-batch*5)},(_,i)=>batch*5+i);
+    s.bridge.setInFlight(pending);
+    assert.equal(s.shots.state.hovering,pending.length);
+    for(const index of [...pending].reverse()) {
+      saved.push(index); s.bridge.chunkSaved(index);
+      assert.equal(s.shots.state.confirmed,Math.floor(saved.length*40/52));
+      assert.equal(s.shots.state.remaining+s.shots.state.hovering+s.shots.state.confirmed,40);
+    }
+    s.shots.fastForward();
+    assert.equal(s.shots.state.remaining+s.shots.state.hovering+s.shots.state.confirmed,40);
+  }
+  assert.equal(s.shots.state.settled,40); assert.equal(s.shots.state.hovering,0);
 });

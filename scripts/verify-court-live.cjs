@@ -22,6 +22,16 @@ bridge.subscribe((event) => {
   if (event.type === 'saved') events.push(event.index);
 });
 const transport = axios.create({ baseURL: origin });
+const { observeUploadActivity, EMPTY_ACTIVITY } = loadTs('src/lib/uploadActivity.ts');
+const confirmationTimes = [];
+let activityState = EMPTY_ACTIVITY;
+const activity = observeUploadActivity(value => {
+  activityState = value;
+  // Like React's effect, apply saved diffs before releasing their hover assignment.
+  queueMicrotask(() => bridge.setInFlight(activityState.indices));
+}, { client: transport, limit: 5, onTiming: timing => {
+  if (timing.confirmed) confirmationTimes.push(timing.elapsedMs);
+} });
 let injected = false,
   paused = false,
   fileId = null,
@@ -70,6 +80,7 @@ const moduleUnderTest = loadTs(
 // ── Feed the exact UI bridge mapping from real uploader callbacks ──
 controls = moduleUnderTest.createUploader((update) => {
   state = { ...state, ...update };
+  activity.update(update);
   if (state.fileId) fileId = state.fileId;
   const finishing =
     state.totalBytes > 0 && state.uploadedBytes >= state.totalBytes;
@@ -84,6 +95,7 @@ controls = moduleUnderTest.createUploader((update) => {
     phase,
     Math.max(1, Math.ceil(state.totalBytes / moduleUnderTest.CHUNK_SIZE)),
     state.fileId,
+    activityState.indices,
   );
   if (update.uploadedChunks)
     console.log(
@@ -143,6 +155,9 @@ async function main() {
     }
     assert.equal(length, file.size);
     assert.equal(hash.digest('hex'), expected);
+    const times = [...confirmationTimes].sort((a, b) => a - b);
+    assert.ok(times.length >= 26);
+    console.log(`Request-to-confirmation: median ${Math.round(times[Math.floor(times.length / 2)])} ms; slowest ${Math.round(times.at(-1))} ms (${times.length} successful attempts).`);
     console.log(
       'PASS: real 104 MB upload, transport retry, pause/resume, 26 unique confirmed shots, 26 settled pieces, and byte-exact streamed download.',
     );
@@ -150,6 +165,7 @@ async function main() {
     clearTimeout(timeout);
     clearInterval(timer);
     controls.abort(false);
+    activity.dispose();
     assert.equal(shots.state.settled, 0);
     assert.equal(shots.state.queued, 0);
     if (fileId) {

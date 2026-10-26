@@ -77,6 +77,14 @@ native modal drawer with five newest files and a link to the full table.
 Idle balls settle after an initial drop. Uploads reserve the actual floor inventory
 (up to 40 balls), grouped by confirmed pieces above 40; reserved balls retain their
 position, radius and rotation as they score. Files and Bin use ten calm balls.
+Actual chunk requests borrow up to five floor balls into a gently hovering launch
+line with cobalt rings. Confirmed indices launch their own assigned ball; retries
+retain it, and pause/final failure return it to its original floor spot. The three
+inventory states remain conserved, including the capped, grouped inventory above
+40 pieces. A transport observer supplies activity only; saved indices still own
+all scoring. The dock distinguishes uploading, saved and bytes sent, and shows a
+normal-colour waiting message after ten seconds. Reduced motion and unavailable
+WebGL keep these explanations in the dock without activity animation.
 
 ## Do's and Don'ts
 Keep controls opaque enough to read and focus rings above scenery. Use a bounded,

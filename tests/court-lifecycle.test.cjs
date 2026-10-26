@@ -284,3 +284,28 @@ test('quality steps down without removing unconfirmed floor inventory on mobile'
   assert.equal(batches[0].count, 26);
   h.dispose();
 });
+
+test('hover rings, pause drops, out-of-order scoring and hidden return keep real rendered inventories consistent', () => {
+  const h=harness(); h.bridge.setInFlight([0,1,2,3,4]); h.frame();
+  const batches=h.renderer.scene.children.filter(object=>object.isInstancedMesh);
+  assert.equal(batches[0].count,21); assert.equal(batches[1].count,5); assert.equal(batches[4].count,5);
+  const hovering=new THREE.Matrix4(); batches[1].getMatrixAt(2,hovering);
+  h.bridge.chunkSaved(2); h.frame();
+  assert.equal(batches[0].count,21); assert.equal(batches[4].count,4);
+  h.bridge.paused(); h.frame();
+  assert.equal(batches[0].count,25); assert.equal(batches[4].count,0);
+  h.bridge.resumed(); h.bridge.setInFlight([0,1,3,4]); h.frame();
+  assert.equal(batches[0].count,21); assert.equal(batches[4].count,4);
+  h.visibility(true); h.bridge.chunkSaved(4); h.bridge.setInFlight([0,1,3,5]);
+  h.frame(30000); h.visibility(false); h.frame();
+  assert.equal(batches[0].count,20); assert.equal(batches[1].count,6); assert.equal(batches[4].count,4);
+  h.bridge.failed(); h.frame(); assert.equal(batches[0].count,24); assert.equal(batches[4].count,0);
+  for(let i=0;i<300;i++) h.frame();
+  const returned=new THREE.Matrix4();
+  for(let i=0;i<batches[0].count;i++) {
+    batches[0].getMatrixAt(i,returned);
+    assert.ok(Math.abs(returned.elements[13]-returned.getMaxScaleOnAxis())<.02,'returned balls finish their drop on error');
+  }
+  h.bridge.reset(); h.frame(); assert.equal(batches[0].count,24); assert.equal(batches[1].count,0);
+  assert.equal(h.failures.length,0); h.dispose();
+});

@@ -90,3 +90,16 @@ See [resume-and-quota-report.md](resume-and-quota-report.md) for the cause analy
 acceptance results and commands to remove abandoned uploads safely. The opt-in
 live verification script now also requires `UPLOAD_TEST_ACCESS_TOKEN` for a
 signed-in user; ordinary tests use isolated HTTP and database mocks.
+
+## In-flight court activity
+
+Actual chunk requests now borrow up to five resting balls into a hovering launch
+line. A piece's own ball scores only when uploadedChunks confirms that index.
+Retries keep the assignment; pause/final failure return it to the floor. The dock
+separates uploading pieces, saved pieces and bytes sent, with a waiting message
+after ten seconds. Upload engine and API behavior are unchanged.
+
+The existing opt-in live test also logs each request-to-confirmation duration and
+prints the successful-attempt median and maximum. See
+[inflight-balls-report.md](inflight-balls-report.md) for acceptance results and
+live-test limitations.

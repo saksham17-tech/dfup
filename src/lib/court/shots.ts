@@ -12,12 +12,15 @@ export type Shot = {
   ordinal: number;
   queued: boolean;
   scored: boolean;
+  hovering: boolean; hoverAge: number; lane: number; floorIndex: number;
+  originX: number; originY: number; originZ: number;
   fromX: number; fromY: number; fromZ: number; radius: number;
   rotationX: number; rotationY: number; rotationZ: number;
 };
 export type FloorInventory = {
   rebuild: (count: number, drop: boolean) => void;
   reserve: (shot: Shot) => void;
+  restore?: (shot: Shot) => void;
 };
 export function ballisticCoordinate(
   start: number,
@@ -43,13 +46,15 @@ export function createShots(bridge: UploadBridge, inventory?: FloorInventory) {
   const queue: number[] = [];
   const slots: Shot[] = Array.from({ length: 40 }, () => ({
     active: false,
-    index: 0,
+    index: -1,
     age: 0,
     flight: 1,
     swished: false,
     ordinal: 0,
     queued: false, scored: false, fromX: LAUNCH.x, fromY: LAUNCH.y, fromZ: LAUNCH.z,
     radius: 0.27, rotationX: 0, rotationY: 0, rotationZ: 0,
+    hovering: false, hoverAge: 0, lane: 0, floorIndex: -1,
+    originX: LAUNCH.x, originY: LAUNCH.y, originZ: LAUNCH.z,
   }));
   let count = snapshot.view === 'browse' ? 10 : snapshot.phase === 'idle' ? 24 : Math.min(40, snapshot.total);
   let issued = 0, fired = 0;
@@ -62,26 +67,59 @@ export function createShots(bridge: UploadBridge, inventory?: FloorInventory) {
     netImpulse = 0;
   inventory?.rebuild(count, phase === 'idle' && snapshot.view === 'upload');
 
-  function reserveOwed() {
+  const freeSlot = () => slots.slice(0, count).find(slot => !slot.scored && !slot.active && !slot.queued && !slot.hovering && slot.index < 0)
+    ?? slots.slice(0, count).find(slot => !slot.scored && !slot.active && !slot.queued && !slot.hovering);
+  function returnToFloor(slot: Shot) {
+    slot.hovering = false; slot.hoverAge = 0;
+    inventory?.restore?.(slot);
+  }
+  function reserveOwed(index = -1) {
     if (bridge.snapshot().view === 'browse') return;
     const owed = Math.floor(seen.size * count / bridge.snapshot().total);
     while (issued < owed) {
-      const slot = slots[issued];
-      slot.index = issued; slot.ordinal = issued; slot.active = false;
+      const slot = slots.find(candidate => candidate.index === index && !candidate.scored && !candidate.active && !candidate.queued) ?? freeSlot();
+      if (!slot) throw new Error('Upload ball inventory exhausted');
+      if (slot.hovering) {
+        const point = { x: 0, y: 0, z: 0 }; hoverPosition(slot, point);
+        slot.fromX = point.x; slot.fromY = point.y; slot.fromZ = point.z;
+        slot.hovering = false;
+      } else inventory?.reserve(slot);
+      slot.index = index < 0 ? issued : index; slot.ordinal = issued; slot.active = false;
       slot.queued = true; slot.age = 0; slot.swished = false;
-      inventory?.reserve(slot);
-      queue.push(issued++);
+      queue.push(slots.indexOf(slot)); issued++;
     }
     if (queue.length > 20) {
       const extra = queue.length - 20;
       for (let i = 0; i < extra; i++) { slots[queue[i]].queued = false; slots[queue[i]].scored = true; }
       settled += extra; fired += extra; queue.splice(0, extra);
     }
+    // Above 40 pieces, confirmations that do not complete a visual share return
+    // their borrowed ball. The next owed share uses its own confirming ball.
+    const partial = slots.find(slot => slot.index === index && slot.hovering);
+    if (partial) { returnToFloor(partial); partial.index = -1; }
+  }
+  function syncActivity(indices: readonly number[]) {
+    const pending = phase === 'uploading' || phase === 'finishing'
+      ? new Set(indices.filter(index => !seen.has(index))) : new Set<number>();
+    for (const slot of slots) if (slot.hovering && !pending.has(slot.index)) returnToFloor(slot);
+    if (bridge.snapshot().view === 'browse') return;
+    for (const index of pending) {
+      let slot = slots.find(candidate => candidate.index === index && !candidate.scored && !candidate.active && !candidate.queued);
+      if (slot?.hovering) continue;
+      slot ??= freeSlot();
+      if (!slot) continue;
+      slot.index = index;
+      slot.lane = 0;
+      while (slots.some(other => other !== slot && other.hovering && other.lane === slot.lane)) slot.lane++;
+      inventory?.reserve(slot);
+      slot.hovering = true; slot.hoverAge = 0;
+    }
   }
   // Hydration / late lazy loading reconciles confirmed balls directly into the return.
   reserveOwed();
   for (let i = 0; i < slots.length; i++) { slots[i].queued = false; slots[i].scored = i < issued; }
   queue.length = 0; fired = issued; settled = issued;
+  syncActivity([...snapshot.inFlight]);
 
   // ── Event bookkeeping: duplicates never become shots ──
   function accept(event: UploadEvent) {
@@ -97,22 +135,31 @@ export function createShots(bridge: UploadBridge, inventory?: FloorInventory) {
       celebrated = false;
       netImpulse = 0;
       next = clock;
-      for (const slot of slots) { slot.active = false; slot.queued = false; slot.scored = false; }
+      for (const slot of slots) { slot.active = false; slot.queued = false; slot.scored = false; slot.hovering = false; slot.index = -1; slot.floorIndex = -1; }
     } else if (event.type === 'phase') {
       if (phase === 'idle' && event.phase !== 'idle' && bridge.snapshot().view === 'upload') prepareUpload();
       phase = event.phase;
+      if (phase !== 'uploading' && phase !== 'finishing') syncActivity([]);
+    }
+    else if (event.type === 'activity') {
+      if (phase === 'idle' && event.indices.length) prepareUpload();
+      syncActivity(event.indices);
     }
     else if (!seen.has(event.index)) {
       if (phase === 'idle') prepareUpload();
       seen.add(event.index);
-      reserveOwed();
+      reserveOwed(event.index);
     }
   }
   function fastForward() {
     reserveOwed();
     settled = issued; fired = issued;
     queue.length = 0;
-    for (let i = 0; i < slots.length; i++) { slots[i].active = false; slots[i].queued = false; slots[i].scored = i < issued; }
+    for (const slot of slots) {
+      if (slot.active || slot.queued) slot.scored = true;
+      slot.active = false; slot.queued = false;
+    }
+    syncActivity([...bridge.snapshot().inFlight]);
     if (phase === 'completed') celebrated = true;
     celebration = -1;
     next = clock;
@@ -134,6 +181,7 @@ export function createShots(bridge: UploadBridge, inventory?: FloorInventory) {
     let active = false;
     for (let i = 0; i < slots.length; i++) {
       const slot = slots[i];
+      if (slot.hovering) slot.hoverAge += dt;
       if (!slot.active) continue;
       slot.age += dt;
       const rimDelay = slot.index % 8 === 3 ? 0.16 : 0;
@@ -184,13 +232,22 @@ export function createShots(bridge: UploadBridge, inventory?: FloorInventory) {
         return netImpulse;
       },
       get ballCount() { return count; },
-      get remaining() { return count - issued; },
+      get hovering() { return slots.filter(slot => slot.hovering).length; },
+      get confirmed() { return issued; },
+      get remaining() { return count - issued - slots.filter(slot => slot.hovering).length; },
       get shotsFired() { return fired; },
     },
   };
 }
 
 // ── Reusable output avoids allocating a vector per animated ball ──
+export function hoverPosition(shot: Shot, out: { x: number; y: number; z: number }) {
+  const t = Math.min(1, shot.hoverAge / 0.5), eased = t * t * (3 - 2 * t);
+  out.x = shot.originX + (RIM.x - 2.3 + shot.lane * 1.05 - shot.originX) * eased;
+  out.z = shot.originZ + (RIM.z + 4.5 + (shot.lane % 2) * .8 - shot.originZ) * eased;
+  out.y = shot.originY + (1.1 + Math.sin(shot.hoverAge * 3 + shot.lane) * .08 - shot.originY) * eased;
+}
+
 export function shotPosition(
   shot: Shot,
   out: { x: number; y: number; z: number },

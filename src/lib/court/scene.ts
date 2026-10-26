@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { advanceWorld, createWorld } from './physics';
 import { basketballTexture, contactTexture, hardwoodTexture } from './textures';
-import { createShots, pilePosition, RIM, shotPosition, type Shot } from './shots';
+import { createShots, hoverPosition, pilePosition, RIM, shotPosition, type Shot } from './shots';
 import type { UploadBridge } from './uploadBridge';
 
 type Tier = 'high' | 'medium' | 'low';
@@ -323,6 +323,14 @@ export function mountCourt(
     confetti.frustumCulled = false;
     scene.add(confetti);
 
+    const hoverRings = new THREE.InstancedMesh(
+      new THREE.TorusGeometry(1, .035, 6, 32),
+      new THREE.MeshBasicMaterial({ color: token('cobalt'), transparent: true, opacity: .55, depthWrite: false }),
+      5,
+    );
+    hoverRings.count = 0; hoverRings.frustumCulled = false;
+    hoverRings.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(hoverRings);
+
     // ── Quality adaptation: measurements never step back up ──
     const readout = options.perf ? document.createElement('output') : null;
     if (readout) {
@@ -385,6 +393,7 @@ export function mountCourt(
     const projected = new THREE.Vector3(), ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     const ray = new THREE.Raycaster(), screen = new THREE.Vector2(), candidate = new THREE.Vector3();
     let avoid: DOMRect[] = [];
+    const floorOwners: (Shot | undefined)[] = [];
     const measureAvoid = () => {
       if (typeof document.querySelectorAll === 'function') {
         avoid = Array.from(document.querySelectorAll<HTMLElement>('[data-court-avoid]'), element => element.getBoundingClientRect())
@@ -398,6 +407,7 @@ export function mountCourt(
       return Math.abs(projected.x) > 0.95 || Math.abs(projected.y) > 0.95;
     }
     function rebuildFloor(count: number, drop: boolean) {
+      floorOwners.length = 0;
       measureAvoid(); world.count = count; world.accumulator = 0;
       for (let i = 0; i < world.balls.length; i++) {
         const b = world.balls[i]; b.enabled = i < count;
@@ -423,18 +433,31 @@ export function mountCourt(
     }
     function reserveFloorBall(shot: Shot) {
       measureAvoid();
-      let selected = -1;
+      let selected = shot.floorIndex;
+      if (selected >= 0 && !world.balls[selected].enabled) throw new Error('Floor ball is already reserved');
+      if (selected < 0) {
       for (let i = 0; i < world.count; i++) {
-        const b = world.balls[i]; if (!b.enabled) continue;
+        const b = world.balls[i]; if (!b.enabled || floorOwners[i]) continue;
         if (selected === -1) selected = i;
         if (!obscured(b.x, b.y, b.z)) { selected = i; break; }
       }
+      }
       if (selected < 0) throw new Error('Upload ball inventory exhausted');
       const b = world.balls[selected]; b.enabled = false;
+      floorOwners[selected] = shot; shot.floorIndex = selected;
+      shot.originX = b.x; shot.originY = b.y; shot.originZ = b.z;
       shot.fromX = b.x; shot.fromY = b.y; shot.fromZ = b.z; shot.radius = b.radius;
       shot.rotationX = b.ax; shot.rotationY = b.ay; shot.rotationZ = b.az;
     }
-    shots = createShots(bridge, { rebuild: rebuildFloor, reserve: reserveFloorBall });
+    function restoreFloorBall(shot: Shot) {
+      if (shot.floorIndex < 0) return;
+      const b = world.balls[shot.floorIndex]; b.enabled = true;
+      b.x = b.px = shot.originX; b.z = b.pz = shot.originZ;
+      b.y = b.py = b.radius + .3;
+      b.vx = b.vy = b.vz = b.wx = b.wy = b.wz = 0;
+      b.sleeping = false; b.rest = 0;
+    }
+    shots = createShots(bridge, { rebuild: rebuildFloor, reserve: reserveFloorBall, restore: restoreFloorBall });
     window.addEventListener('resize', measureAvoid); cleanups.push(() => window.removeEventListener('resize', measureAvoid));
     let avoidTimer: ReturnType<typeof setTimeout> | undefined;
     if (typeof MutationObserver !== 'undefined' && document.body) {
@@ -489,7 +512,9 @@ export function mountCourt(
         const stopped = shots.state.phase === 'error';
         if (!stopped) time += dt;
         frameCount++;
-        const alpha = stopped ? 1 : advanceWorld(world, dt);
+        // Returned hover balls must finish their small drop even on a final error.
+        // Confirmed scoring arcs still freeze until Retry, as before.
+        const alpha = advanceWorld(world, dt);
         if (!stopped) shots.update(dt);
         shadowCount = 0;
         let floorCount = 0;
@@ -512,10 +537,10 @@ export function mountCourt(
         }
         loose.count = floorCount;
         loose.instanceMatrix.needsUpdate = true;
-        let uploadCount = 0;
+        let uploadCount = 0, ringCount = 0;
         let hasActiveShot = false;
         for (let i = 0; i < shots.slots.length; i++)
-          if (shots.slots[i].active) hasActiveShot = true;
+          if (shots.slots[i].active || shots.slots[i].hovering) hasActiveShot = true;
         const hanging =
           shots.state.phase === 'finishing' &&
           shots.state.saved > 0 &&
@@ -530,7 +555,7 @@ export function mountCourt(
             : 0;
         for (let i = 0; i < shots.slots.length; i++) {
           const slot = shots.slots[i]; if (!slot.scored || i === held) continue;
-          pilePosition(i, point);
+          pilePosition(slot.ordinal, point);
           point.y += hop;
           dummy.position.set(point.x, point.y, point.z);
           dummy.rotation.set(i * 0.5, i * 1.2, 0);
@@ -541,16 +566,23 @@ export function mountCourt(
         }
         for (let i = 0; i < shots.slots.length; i++) {
           const slot = shots.slots[i];
-          if (!slot.active && !slot.queued) continue;
-          if (slot.active) shotPosition(slot, point);
-          else { point.x = slot.fromX; point.y = slot.fromY + 0.08; point.z = slot.fromZ; }
+          if (!slot.active && !slot.queued && !slot.hovering) continue;
+          if (slot.hovering) hoverPosition(slot, point);
+          else if (slot.active) shotPosition(slot, point);
+          else { point.x = slot.fromX; point.y = slot.fromY; point.z = slot.fromZ; }
           dummy.position.set(point.x, point.y, point.z);
           dummy.rotation.set(slot.rotationX + slot.age * 6, slot.rotationY + slot.age * 3, slot.rotationZ);
           dummy.scale.setScalar(slot.radius);
           dummy.updateMatrix();
           uploaded.setMatrixAt(uploadCount++, dummy.matrix);
           shadow(point.x, point.y, point.z, slot.radius);
+          if (slot.hovering) {
+            dummy.position.set(point.x, point.y - slot.radius - .06, point.z);
+            dummy.rotation.set(-Math.PI / 2, 0, 0); dummy.scale.setScalar(slot.radius * 1.5);
+            dummy.updateMatrix(); hoverRings.setMatrixAt(ringCount++, dummy.matrix);
+          }
         }
+        hoverRings.count = ringCount; hoverRings.instanceMatrix.needsUpdate = true;
         if (hanging && held >= 0) {
           dummy.position.set(RIM.x, RIM.y + 0.6, RIM.z);
           dummy.rotation.set(0, 0, 0);

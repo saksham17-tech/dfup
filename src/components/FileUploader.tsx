@@ -5,6 +5,7 @@ import {
   createUploader,
   CHUNK_SIZE,
   MAX_CONCURRENT_UPLOADS,
+  MAX_CHUNK_RETRIES,
   type UploadControls,
   type UploadState,
 } from '@/lib/upload';
@@ -12,6 +13,7 @@ import { Pause, Play, X, RotateCcw, Minus, Maximize2 } from 'lucide-react';
 import CourtProgress from './CourtProgress';
 import { uploadBridge } from '@/lib/court/uploadBridge';
 import { getSupabaseBrowser } from '@/lib/supabaseBrowser';
+import { EMPTY_ACTIVITY, observeUploadActivity } from '@/lib/uploadActivity';
 import { btnAccent, btnPrimary, btnSecondary, formatBytes } from '@/lib/ui';
 
 const PIECE_MB = CHUNK_SIZE / (1024 * 1024);
@@ -32,6 +34,7 @@ export default function FileUploader({
   });
   const [fileName, setFileName] = useState('');
   const [dragging, setDragging] = useState(false);
+  const [activity, setActivity] = useState(EMPTY_ACTIVITY);
 
   const controlsRef = useRef<UploadControls | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -43,7 +46,9 @@ export default function FileUploader({
   }, [onSuccess]);
 
   useEffect(() => {
+    const transportActivity = observeUploadActivity(setActivity, { limit: MAX_CONCURRENT_UPLOADS, maxAttempts: MAX_CHUNK_RETRIES });
     controlsRef.current = createUploader((newState) => {
+      transportActivity.update(newState);
       setUploadState((prev) => ({ ...prev, ...newState }));
       if (newState.status === 'completed') {
         onSuccessRef.current?.();
@@ -52,7 +57,7 @@ export default function FileUploader({
       const { data } = await getSupabaseBrowser().auth.getSession();
       return data.session?.access_token ?? null;
     });
-    return () => controlsRef.current?.abort(false);
+    return () => { transportActivity.dispose(); controlsRef.current?.abort(false); };
   }, []);
 
   const startFile = async (file: File) => {
@@ -87,8 +92,9 @@ export default function FileUploader({
       courtPhase,
       totalPieces,
       uploadState.fileId,
+      activity.indices,
     );
-  }, [uploadedChunks, courtPhase, totalPieces, uploadState.fileId]);
+  }, [uploadedChunks, courtPhase, totalPieces, uploadState.fileId, activity.indices]);
   useEffect(() => () => uploadBridge.reset(), []);
 
   // ── Compact status: the saved count is rendered exactly once ──
@@ -97,6 +103,8 @@ export default function FileUploader({
   const statusText = status === 'error' ? error ?? 'The upload stopped. Retry to continue.'
     : confirming ? 'Last piece sent. Confirming with the server…'
     : status === 'init' ? 'Preparing your upload…'
+    : status === 'uploading' && activity.waiting ? 'Waiting for the server…'
+    : status === 'uploading' ? `${activity.uploading} uploading · ${savedPieces} of ${totalPieces} saved · ${formatBytes(uploadedBytes)} sent`
     : `${status === 'paused' ? 'Paused · ' : ''}${savedPieces} of ${totalPieces} saved · ${formatBytes(uploadedBytes)} of ${formatBytes(totalBytes)}`;
   const [minimized, setMinimized] = useState(false);
   useEffect(() => {
@@ -143,7 +151,7 @@ export default function FileUploader({
         {pill ? (
           <>
             {status === 'idle' ? <button type="button" className={`${btnPrimary} upload-action`} onClick={() => fileInputRef.current?.click()}>Choose file</button>
-              : <span role="progressbar" aria-label="Upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} className="px-1 text-sm font-semibold tabular-nums">{Math.round(progress)}%</span>}
+              : <span role="progressbar" aria-label="Bytes sent" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} className="px-1 text-sm font-semibold tabular-nums">{Math.round(progress)}%</span>}
             {status === 'uploading' || status === 'paused' ? <button type="button" aria-label={status === 'paused' ? 'Resume upload' : 'Pause upload'} className={`${btnSecondary} upload-action upload-icon`} onClick={() => status === 'paused' ? controlsRef.current?.resume() : controlsRef.current?.pause()}>{status === 'paused' ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}</button> : null}
             {cancel}
             {status === 'completed' && <button type="button" aria-label="Upload another file" title="Upload another file" className={`${btnSecondary} upload-action upload-icon`} onClick={() => controlsRef.current?.abort(false)}><RotateCcw className="h-3.5 w-3.5" /></button>}
@@ -160,10 +168,10 @@ export default function FileUploader({
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <h2 className="truncate text-sm font-semibold" title={fileName}>{fileName || 'Your file'}</h2>
-                <p aria-live="polite" className={`upload-status ${status === 'error' ? 'text-alert' : 'text-muted'}`}>{statusText}</p>
+                <p aria-live="polite" className={`upload-status ${status === 'error' ? 'text-alert' : status === 'uploading' && activity.waiting ? 'text-ink' : 'text-muted'}`}>{statusText}</p>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <span className="mr-1 text-sm font-semibold tabular-nums">{Math.round(progress)}%</span>
+                <span title="Bytes sent" className="mr-1 text-sm font-semibold tabular-nums">{Math.round(progress)}%</span>
                 {pauseResume}
                 {canRetry && <button type="button" className={`${btnAccent} upload-action`} onClick={() => controlsRef.current?.resume()}><RotateCcw className="h-3.5 w-3.5" />Retry</button>}
                 {status === 'completed' && <button type="button" className={`${btnSecondary} upload-action`} onClick={() => controlsRef.current?.abort(false)}><RotateCcw className="h-3.5 w-3.5" /><span>Upload another file</span></button>}
@@ -171,7 +179,7 @@ export default function FileUploader({
                 <button type="button" aria-label="Minimize upload bar" title="Minimize upload bar" className={`${btnSecondary} upload-action upload-icon`} onClick={toggleMinimized}><Minus className="h-3.5 w-3.5" /></button>
               </div>
             </div>
-            <CourtProgress totalPieces={totalPieces} savedIndices={uploadedChunks} phase={courtPhase} compact inFlightCount={status === 'uploading' && !finishing ? Math.min(MAX_CONCURRENT_UPLOADS, totalPieces - savedPieces) : 0} label="Upload progress" progress={progress} />
+            <CourtProgress totalPieces={totalPieces} savedIndices={uploadedChunks} phase={courtPhase} compact inFlightCount={0} label="Bytes sent" progress={progress} />
           </>
         )}
       </div>

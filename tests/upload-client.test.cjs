@@ -229,3 +229,73 @@ test('Cancel during init discards the late-created ID; navigation preserves it',
     if (discard) { assert.equal(deletion.url,'/api/upload/late-init'); assert.equal(deletion.options.headers.Authorization,'Bearer signed-in'); }
   }
 });
+
+function activityHarness() {
+  let now = 0, tick, request, success, failure;
+  const events = [], timings = [], ejected = [];
+  const client = { interceptors: {
+    request: {use(fn) {request = fn; return 7;}, eject(id) {ejected.push(id);}},
+    response: {use(ok, bad) {success = ok; failure = bad; return 8;}, eject(id) {ejected.push(id);}},
+  }};
+  const { observeUploadActivity } = loadTs('src/lib/uploadActivity.ts', {axios:{isAxiosError:error=>Boolean(error?.isAxiosError),isCancel:error=>error?.code === 'ERR_CANCELED'}}, {
+    setInterval(fn) {tick=fn;return 1;},clearInterval() {tick=null;},
+  });
+  const activity = observeUploadActivity(value=>events.push(value), {client,limit:5,now:()=>now,onTiming:value=>timings.push(value)});
+  activity.update({fileId:'activity-file',status:'uploading',uploadedChunks:[]});
+  return {activity,events,timings,ejected,
+    request(index, id='activity-file') {const config={url:`/api/upload/${id}/chunk?chunkIndex=${index}&checksum=abc`};request(config);return config;},
+    success(config) {return success({config,data:{ok:true}});},
+    failure(config) {return failure(Object.assign(new Error('retry'),{config,isAxiosError:true}));},
+    advance(ms) {now+=ms;tick?.();},
+  };
+}
+
+test('transport observer tracks actual indices, retains retries and records per-attempt confirmation times', async () => {
+  const h = activityHarness();
+  const first=h.request(0), second=h.request(1); h.request(2,'another-file');
+  assert.deepEqual(h.events.at(-1).indices,[0,1]); assert.equal(h.events.at(-1).uploading,2);
+  h.advance(10001); assert.equal(h.events.at(-1).waiting,true);
+  await assert.rejects(h.failure(first), /retry/);
+  assert.deepEqual(h.events.at(-1).indices,[0,1]);
+  const retry=h.request(0); h.advance(250); h.success(retry);
+  assert.equal(h.timings.at(-1).elapsedMs,250); assert.equal(h.timings.at(-1).confirmed,true);
+  h.activity.update({uploadedChunks:[0]}); assert.deepEqual(h.events.at(-1).indices,[1]);
+  h.activity.update({status:'paused'}); assert.deepEqual(h.events.at(-1).indices,[]);
+  h.activity.update({status:'uploading'}); h.success(second);
+  assert.deepEqual(h.events.at(-1).indices,[],'old responses cannot revive paused activity');
+  h.activity.dispose(); assert.deepEqual(h.ejected,[7,8]);
+});
+
+test('transport activity stays bounded while an acknowledged ball waits for the real saved diff', () => {
+  const h=activityHarness(), configs=[];
+  for(let i=0;i<5;i++) configs.push(h.request(i));
+  h.success(configs[2]); h.request(5);
+  assert.equal(h.events.at(-1).indices.length,5);
+  assert.equal(h.events.at(-1).uploading,5);
+  h.activity.update({uploadedChunks:[2]});
+  assert.deepEqual(h.events.at(-1).indices,[0,1,3,4,5]);
+  h.activity.update({status:'error'}); assert.equal(h.events.at(-1).indices.length,0);
+  h.activity.dispose();
+});
+
+test('the last retry failure returns its ball even while other pool requests are still winding down', async () => {
+  const h=activityHarness();
+  for(let attempt=0;attempt<3;attempt++) {
+    const request=h.request(2); await assert.rejects(h.failure(request),/retry/);
+    assert.equal(h.events.at(-1).indices.includes(2), attempt < 2);
+  }
+  h.activity.dispose();
+});
+
+test('a real Axios adapter retains request identity through instrumentation and cleanup', async () => {
+  const axios=require('axios'), events=[];
+  const client=axios.create({adapter:async config=>({config,data:{ok:true},status:201,statusText:'Created',headers:{}})});
+  const {observeUploadActivity}=loadTs('src/lib/uploadActivity.ts');
+  const activity=observeUploadActivity(value=>events.push(value),{client,limit:5});
+  activity.update({fileId:'adapter',status:'uploading'});
+  const result=await client.post('/api/upload/adapter/chunk?chunkIndex=2&checksum=abc',new FormData());
+  assert.equal(result.status,201); assert.deepEqual(events.at(-1).indices,[2]);
+  assert.equal(events.at(-1).uploading,0);
+  activity.update({uploadedChunks:[2]}); assert.deepEqual(events.at(-1).indices,[]);
+  activity.dispose();
+});

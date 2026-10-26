@@ -6,12 +6,14 @@ export type UploadEvent =
   | { type: 'phase'; phase: CourtPhase }
   | { type: 'configure'; total: number }
   | { type: 'view'; view: 'upload' | 'browse' }
+  | { type: 'activity'; indices: readonly number[] }
   | { type: 'reset' };
 export type UploadBridge = ReturnType<typeof createUploadBridge>;
 
 export function createUploadBridge(demo = false) {
   const listeners = new Set<(event: UploadEvent) => void>();
   const saved = new Set<number>();
+  const inFlight = new Set<number>();
   let phase: CourtPhase = 'idle',
     total = 1,
     session: string | null = null;
@@ -31,6 +33,7 @@ export function createUploadBridge(demo = false) {
     readonly total: number;
     readonly view: 'upload' | 'browse';
     readonly saved: ReadonlySet<number>;
+    readonly inFlight: ReadonlySet<number>;
   } = {
     get phase() {
       return phase;
@@ -40,10 +43,12 @@ export function createUploadBridge(demo = false) {
     },
     get view() { return view; },
     saved,
+    inFlight,
   };
   const setPhase = (next: CourtPhase) => {
     if (next !== phase) {
       phase = next;
+      if (next !== 'uploading' && next !== 'finishing') inFlight.clear();
       emit({ type: 'phase', phase });
     }
   };
@@ -65,6 +70,7 @@ export function createUploadBridge(demo = false) {
       )
         return;
       saved.add(index);
+      inFlight.delete(index);
       emit({ type: 'saved', index });
     },
     paused: () => setPhase('paused'),
@@ -74,6 +80,7 @@ export function createUploadBridge(demo = false) {
     failed: () => setPhase('error'),
     reset() {
       saved.clear();
+      inFlight.clear();
       phase = 'idle';
       session = null;
       emit({ type: 'reset' });
@@ -85,11 +92,20 @@ export function createUploadBridge(demo = false) {
     setView(next: 'upload' | 'browse') {
       if (view !== next) { view = next; emit({ type: 'view', view }); }
     },
+    setInFlight(indices: readonly number[]) {
+      const next = phase === 'uploading' || phase === 'finishing'
+        ? [...new Set(indices)].filter(index => Number.isInteger(index) && index >= 0 && index < total && !saved.has(index)).slice(0, 5)
+        : [];
+      if (next.length === inFlight.size && next.every(index => inFlight.has(index))) return;
+      inFlight.clear(); for (const index of next) inFlight.add(index);
+      emit({ type: 'activity', indices: next });
+    },
     reconcile(
       indices: readonly number[],
       next: CourtPhase,
       pieces: number,
       fileId: string | null = null,
+      activity: readonly number[] = [],
     ) {
       if (next === 'idle') {
         if (phase !== 'idle' || saved.size) bridge.reset();
@@ -104,6 +120,7 @@ export function createUploadBridge(demo = false) {
       if (fileId !== null) session = fileId;
       for (const index of indices) bridge.chunkSaved(index);
       setPhase(next);
+      bridge.setInFlight(activity);
     },
   };
   return bridge;
