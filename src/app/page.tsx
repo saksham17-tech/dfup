@@ -25,7 +25,7 @@ export default function LandingPage() {
               Sign in
             </Link>
             <Link
-              href="https://github.com/xsanchitgupta/distributed_file_upload_system"
+              href="https://github.com/saksham17-tech/dfup"
               target="_blank"
               rel="noopener noreferrer"
               className={btnSecondary}
